@@ -190,6 +190,12 @@ func TestRunIsIdempotent(t *testing.T) {
 	if _, err := Run(Options{Root: root, InvokingUser: "oriol"}, deps); err != nil {
 		t.Fatalf("first Run: %v", err)
 	}
+	cfgPath := filepath.Join(root, layout.ConfigFile)
+	before, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+
 	// Second run validates the existing boundary instead of failing.
 	deps2, _, _ := newDeps(root, nil)
 	res, err := Run(Options{Root: root, InvokingUser: "oriol"}, deps2)
@@ -198,6 +204,16 @@ func TestRunIsIdempotent(t *testing.T) {
 	}
 	if res.ConfigCreated || res.SecretsCreated {
 		t.Fatalf("second run should validate, not recreate: %+v", res)
+	}
+
+	// A validating re-run must not clobber the existing config (e.g. operator
+	// comments in the starter document).
+	after, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("read config after: %v", err)
+	}
+	if string(before) != string(after) {
+		t.Fatalf("validating re-run modified config.toml")
 	}
 }
 

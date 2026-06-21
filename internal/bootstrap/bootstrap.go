@@ -232,21 +232,26 @@ func (r *runner) ensureConfig(account *config.Account) error {
 		r.res.AccountAdded = account.ID
 	}
 
-	var data []byte
-	if !existed && account == nil {
-		// Pristine starter document with the documented commented example.
-		if data, err = config.StarterDocument(); err != nil {
-			return err
+	// Only write when content actually changes: a re-run that merely validates
+	// an existing config must not clobber operator comments or formatting.
+	if !existed || account != nil {
+		var data []byte
+		if !existed && account == nil {
+			// Pristine starter document with the documented commented example.
+			if data, err = config.StarterDocument(); err != nil {
+				return err
+			}
+		} else {
+			if data, err = config.Marshal(cfg); err != nil {
+				return err
+			}
 		}
-	} else {
-		if data, err = config.Marshal(cfg); err != nil {
-			return err
+		if err := writeFileAtomic(p, data, spec.Mode); err != nil {
+			return fmt.Errorf("write config: %w", err)
 		}
 	}
 
-	if err := writeFileAtomic(p, data, spec.Mode); err != nil {
-		return fmt.Errorf("write config: %w", err)
-	}
+	// Always normalize permissions and ownership, even when validating.
 	if err := os.Chmod(p, spec.Mode); err != nil {
 		return fmt.Errorf("chmod config: %w", err)
 	}
@@ -287,6 +292,7 @@ func (r *runner) ensureSecrets(account *config.Account) error {
 		return err
 	}
 
+	changed := !existed
 	if account != nil {
 		key := account.PasswordRef.ID
 		if _, ok := store.Secrets[key]; ok {
@@ -304,10 +310,14 @@ func (r *runner) ensureSecrets(account *config.Account) error {
 		for i := range secret {
 			secret[i] = 0
 		}
+		changed = true
 	}
 
-	if err := writeSecretStore(p, store, spec.Mode); err != nil {
-		return fmt.Errorf("write secrets: %w", err)
+	// Only rewrite the secrets file when it is new or a secret was added.
+	if changed {
+		if err := writeSecretStore(p, store, spec.Mode); err != nil {
+			return fmt.Errorf("write secrets: %w", err)
+		}
 	}
 	if err := os.Chmod(p, spec.Mode); err != nil {
 		return fmt.Errorf("chmod secrets: %w", err)
