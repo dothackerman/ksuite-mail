@@ -1,0 +1,43 @@
+name: PR Gate
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-gate-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    name: Format, lint, test, and scan
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        if: hashFiles('go.mod') != ''
+        uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: true
+
+      - name: Install Go quality tools
+        if: hashFiles('go.mod') != ''
+        run: |
+          go install golang.org/x/tools/cmd/goimports@latest
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest || go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
+
+      - name: Install Semgrep
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install semgrep
+
+      - name: Run full quality gate
+        run: make gate

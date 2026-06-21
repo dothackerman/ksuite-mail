@@ -1,0 +1,12 @@
+#!/usr/bin/env sh
+set -eu
+
+make fmt
+
+if ! git diff --quiet; then
+  echo "Formatter changed files. Review and stage the formatting changes, then commit again."
+  exit 1
+fi
+
+make lint
+

@@ -10,6 +10,14 @@
 /vendor/
 coverage.out
 coverage.html
+coverage/
+*.coverprofile
+*.prof
+*.pprof
+
+# Tool caches
+.cache/
+.semgrep/
 
 # Local runtime state
 *.db
@@ -41,4 +49,3 @@ Thumbs.db
 .vscode/
 *.swp
 *.swo
-
