@@ -1,5 +1,21 @@
 # Non-Functional Requirements
 
+## How To Reference NFRs
+
+Implementation issues should cite the narrow `NFR-*` sections needed for the slice.
+
+Use:
+
+- `NFR-CFG-*` for configuration.
+- `NFR-SEC-*` for credentials and secret handling.
+- `NFR-PRV-*` for privacy boundaries.
+- `NFR-PERF-*` for cache, refresh, retention, and latency.
+- `NFR-ERR-*` for offline and error behavior.
+- `NFR-OPS-*` for local deployment and systemd.
+- `NFR-REL-*` for IMAP library and provider variance.
+
+Coding agents should not need to read every NFR section for a narrow issue.
+
 ## Configuration
 
 ### NFR-CFG-001 Format

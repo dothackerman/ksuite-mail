@@ -8,15 +8,20 @@ Guidance for coding agents implementing this repository.
 
 The human user is mainly the operator for setup, `doctor`, and diagnostics. The agent is the primary consumer of mail lookup commands, but agents must never receive credentials, raw IMAP access, or non-policy-approved private mail.
 
-## Source Of Truth
+## Working From Issues
 
-Read these documents before implementation:
+Issues should identify the narrow documentation slices needed for the task.
 
-- `docs/requirements.md`
-- `docs/non-functional-requirements.md`
-- `docs/architecture-arc42.md`
+Use this split:
 
-If code and docs disagree, stop and update the docs or ask for a product decision before widening behavior.
+- User intent: cite `UC-*`, `FR-*`, and `NFR-*` sections from `docs/requirements.md` and `docs/non-functional-requirements.md`.
+- Technical intent: cite `ARCH-*` and `ADR-*` sections from `docs/architecture-arc42.md`.
+
+Read the issue-linked sections first. Do not read or reinterpret every requirement and architecture chapter for a narrow slice unless the issue is missing references, the linked sections conflict, or the implementation touches a cross-cutting boundary.
+
+If an issue lacks precise references, add a comment proposing the needed `UC-*`/`FR-*`/`NFR-*` and `ARCH-*`/`ADR-*` sections before widening behavior.
+
+If code and docs disagree, stop and update the docs or ask for a product decision before implementation continues.
 
 ## Security Boundaries
 
@@ -58,7 +63,7 @@ For `domain` accounts:
 
 ## Refresh And Cache
 
-- Do not implement background mail sync in v1.
+- Do not implement background mail refresh in v1.
 - Relevant commands trigger bounded on-demand refresh before cache queries.
 - Use IMAP UID state as the remote freshness mechanism: `UIDVALIDITY`, `UIDNEXT`, UID ranges, and `HIGHESTMODSEQ`/CONDSTORE when supported.
 - Use `BODY.PEEK` or read-only fetch behavior so read-only access does not mark messages as seen.
@@ -102,4 +107,3 @@ Probe output must be sanitized and should report capabilities, booleans, counts,
 - Prefer small, auditable interfaces over broad abstractions.
 - Add tests for policy boundaries, search-before-fetch ordering, credential redaction, structured stale results, and cache invalidation.
 - Keep JSON responses compact and stable for agent consumption.
-

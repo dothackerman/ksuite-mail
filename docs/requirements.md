@@ -1,5 +1,15 @@
 # Requirements
 
+## How To Reference Requirements
+
+Implementation issues should reference the narrow sections needed for the slice:
+
+- `UC-*` sections describe user-visible intent.
+- `FR-*` sections describe product behavior.
+- `NFR-*` sections in `docs/non-functional-requirements.md` describe security, operations, reliability, performance, and error constraints.
+
+Coding agents should not need to read every requirement for a narrow implementation issue.
+
 ## Scope
 
 Build a standalone local CLI and daemon for controlled read-only access to Infomaniak K-Mail.
@@ -211,6 +221,23 @@ Result:
 - Uses server-side IMAP `UID SEARCH` before any `FETCH`.
 - Does not download, cache, index, or expose non-matching private messages.
 
+### UC-011 Probe Infomaniak IMAP Behavior
+
+Actor: local human user or implementation agent through the local CLI.
+
+Command:
+
+```bash
+ksuite-mail doctor --imap-probe --json
+```
+
+Result:
+
+- The CLI talks to the daemon through the Unix socket.
+- The daemon resolves credentials internally and probes Infomaniak IMAP behavior.
+- The probe returns sanitized capability, folder, extension, and behavior diagnostics.
+- The probe does not expose credentials, raw IMAP command execution, message subjects, message bodies, raw headers, attachment names, or arbitrary provider text.
+
 ## Functional Requirements
 
 ### FR-001 Standalone Operation
@@ -370,3 +397,23 @@ When a configured folder is refreshed:
 - Messages moved out of a configured folder must be treated as deleted from that folder.
 - Messages moved into another configured folder must be added or updated when that folder is refreshed.
 - Messages moved into non-configured folders are outside the first-version visible mail surface.
+
+### FR-014 Fixed Provider Probe
+
+Provider probing must be a fixed checklist, not an arbitrary IMAP command runner.
+
+The probe may check:
+
+- `CAPABILITY`
+- `LIST`
+- `EXAMINE` or read-only `SELECT`
+- `UIDVALIDITY`
+- `UIDNEXT`
+- `UID SEARCH HEADER`
+- UID range search
+- `BODY.PEEK`
+- `CONDSTORE` / `HIGHESTMODSEQ`
+- Sent folder naming
+- `Bcc` availability in sent mail
+
+Probe output must use safe structured diagnostics such as booleans, counts, capability names, folder names, and redacted error codes.

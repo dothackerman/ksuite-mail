@@ -2,6 +2,12 @@
 
 arc42 structure for `ksuite-mail`.
 
+## 0. How To Reference Architecture
+
+Implementation issues should cite narrow `ARCH-*` sections for technical intent and `ADR-*` sections for decisions.
+
+Use requirement references for user intent and architecture references for implementation shape. Coding agents should not need to read the full architecture document for a narrow issue.
+
 ## 1. Introduction And Goals
 
 ### 1.1 Requirements Overview
@@ -161,7 +167,7 @@ Performance strategy:
                                                         +---------------------------+
 ```
 
-### 5.2 Level 2 Components
+### ARCH-BLD-002 Level 2 Components
 
 | Component | Responsibility |
 |---|---|
@@ -171,6 +177,7 @@ Performance strategy:
 | Policy engine | Apply full/domain account policy. |
 | Refresh coordinator | Run command-triggered IMAP refresh and update cache state. |
 | IMAP adapter | Hide `go-imap/v2` behind internal interface. |
+| Provider probe | Run fixed sanitized Infomaniak capability and behavior checks. |
 | MIME parser | Parse headers and text bodies. |
 | Cache repository | Read/write policy-approved SQLite rows. |
 | FTS search | Search approved cached text. |
@@ -178,7 +185,7 @@ Performance strategy:
 | Credential resolver | Resolve secrets daemon-side only. |
 | Audit logger | Record policy decisions without leaking content. |
 
-### 5.3 Internal Interfaces
+### ARCH-BLD-003 Internal Interfaces
 
 Mail source adapter:
 
@@ -205,7 +212,7 @@ POST /v1/doctor
 
 ## 6. Runtime View
 
-### 6.1 List Messages
+### ARCH-RUN-001 List Messages
 
 ```text
 agent
@@ -217,7 +224,7 @@ agent
   -> daemon returns compact JSON with refresh status
 ```
 
-### 6.2 Domain-Scoped Refresh
+### ARCH-RUN-002 Domain-Scoped Refresh
 
 ```text
 daemon
@@ -235,7 +242,7 @@ daemon
   -> update last_successful_refresh_at and UID state
 ```
 
-### 6.3 Show Message
+### ARCH-RUN-003 Show Message
 
 ```text
 agent
@@ -246,7 +253,7 @@ agent
   -> daemon returns bounded body
 ```
 
-### 6.4 Doctor
+### ARCH-RUN-004 Doctor
 
 ```text
 user
@@ -258,7 +265,7 @@ user
   -> daemon returns diagnostics without secrets
 ```
 
-### 6.5 Offline Or Remote Failure
+### ARCH-RUN-005 Offline Or Remote Failure
 
 ```text
 agent
@@ -271,7 +278,7 @@ agent
 
 Remote errors are classified for useful CLI diagnostics without returning credentials, raw provider text, subjects, bodies, attachment names, or non-approved mail content.
 
-### 6.6 Init
+### ARCH-RUN-006 Init
 
 ```text
 human
@@ -284,9 +291,22 @@ human
 
 `init` does not create an agent-specific OS user.
 
+### ARCH-RUN-007 Fixed Provider Probe
+
+```text
+human or implementation agent
+  -> ksuite-mail doctor --imap-probe --json
+  -> CLI sends fixed probe request over UDS
+  -> daemon resolves credentials internally
+  -> daemon runs fixed Infomaniak IMAP checklist
+  -> daemon returns sanitized capability and behavior diagnostics
+```
+
+The probe is a diagnostic checklist. It is not a raw IMAP command endpoint.
+
 ## 7. Deployment View
 
-### 7.1 Linux Files
+### ARCH-DEP-001 Linux Files
 
 ```text
 /usr/local/bin/ksuite-mail          root:root          755
@@ -297,7 +317,7 @@ human
 /run/ksuite-mail/ksuite-mail.sock   ksuite-mail:<access-group> 660
 ```
 
-### 7.2 Users And Groups
+### ARCH-DEP-002 Users And Groups
 
 Single-user local deployment may use the existing local user's primary group for socket access:
 
@@ -312,7 +332,7 @@ sudo groupadd mailagents
 sudo usermod -aG mailagents "$USER"
 ```
 
-### 7.3 systemd Units
+### ARCH-DEP-003 systemd Units
 
 Service:
 
@@ -341,7 +361,7 @@ SocketMode=0660
 
 ## 8. Crosscutting Concepts
 
-### 8.1 Policy Enforcement
+### ARCH-CON-001 Policy Enforcement
 
 Policy is enforced in the daemon, never in the CLI.
 
@@ -354,7 +374,7 @@ Only `From`, `To`, `Cc`, and available `Bcc` headers are first-version policy ma
 
 Body text and quoted history are never policy match inputs.
 
-### 8.2 Credential Boundary
+### ARCH-CON-002 Credential Boundary
 
 Only the daemon resolves credentials.
 
@@ -364,7 +384,7 @@ The CLI and agents cannot read:
 - daemon keyring
 - raw IMAP session state
 
-### 8.3 Stable IDs
+### ARCH-CON-003 Stable IDs
 
 Public ids are opaque.
 
@@ -374,7 +394,7 @@ Internal mapping:
 account_id + folder + uidvalidity + uid
 ```
 
-### 8.4 Cache Boundary
+### ARCH-CON-004 Cache Boundary
 
 Cache contains only policy-approved content.
 
@@ -384,7 +404,7 @@ Cached message rows are retained according to `last_loaded_or_verified_at`, not 
 
 Remote deletions remove local rows when observed. Moves are represented as deletion from the old configured folder plus add/update in the new configured folder when that folder is refreshed.
 
-### 8.5 Refresh Boundary
+### ARCH-CON-005 Refresh Boundary
 
 There is no background mail refresh in the first version.
 
@@ -399,7 +419,7 @@ Refresh uses:
 
 Message content hashes may be stored locally after policy-approved fetches, but remote hash comparison is not the primary freshness mechanism.
 
-### 8.6 IPC
+### ARCH-CON-006 IPC
 
 First version:
 
@@ -414,6 +434,29 @@ protobuf/gRPC
 ```
 
 Use protobuf/gRPC only if stronger generated schemas, streaming, multiple non-CLI clients, or higher throughput justify the extra complexity.
+
+### ARCH-CON-007 Provider Probe Boundary
+
+Provider probing must stay daemon-side and credential-safe.
+
+The probe may return:
+
+- capability names
+- extension support
+- folder names
+- safe counts
+- booleans for checklist outcomes
+- redacted error codes
+
+The probe must not return:
+
+- credentials
+- raw IMAP command execution capability
+- message subjects
+- message bodies
+- raw message headers
+- attachment names
+- arbitrary provider text that could contain private content
 
 ## 9. Architecture Decisions
 
