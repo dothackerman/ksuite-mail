@@ -372,7 +372,9 @@ Domain policy has two gates:
 
 Only `From`, `To`, `Cc`, and available `Bcc` headers are first-version policy match inputs.
 
-Body text and quoted history are never policy match inputs.
+Body text and embedded previous replies are never policy match inputs.
+
+Embedded previous replies means older thread content copied inside a newer email body. They may include private unrelated messages and are not returned for first-version `domain` accounts unless a later product decision explicitly accepts that risk.
 
 ### ARCH-CON-002 Credential Boundary
 
@@ -383,6 +385,20 @@ The CLI and agents cannot read:
 - `/etc/ksuite-mail/secrets.json`
 - daemon keyring
 - raw IMAP session state
+
+For the first file-backed backend, `/etc/ksuite-mail/secrets.json` maps each `password_ref.id` to a typed secret:
+
+```json
+{
+  "version": 1,
+  "secrets": {
+    "/ksuite-mail/rs_info/password": {
+      "type": "password",
+      "value": "example-app-password"
+    }
+  }
+}
+```
 
 ### ARCH-CON-003 Stable IDs
 
@@ -457,6 +473,8 @@ The probe must not return:
 - raw message headers
 - attachment names
 - arbitrary provider text that could contain private content
+
+Checks that depend on mailbox content or folder state require a controlled test account or folder with known fixture messages. Without fixtures, the daemon must return `inconclusive` for the affected checks.
 
 ## 9. Architecture Decisions
 
@@ -554,6 +572,14 @@ Required probe areas:
 - CONDSTORE/HIGHESTMODSEQ
 - Sent folder naming and Bcc availability
 
+Required fixture semantics:
+
+- known matching `From`, `To`, and `Cc` messages
+- a known sent-message `Bcc` case when exposed by Infomaniak
+- a known non-matching message that must remain invisible
+- enough UID spacing to exercise UID range search
+- inconclusive reporting when a fixture is missing
+
 ## 10. Quality Requirements
 
 | Quality | Scenario |
@@ -563,7 +589,7 @@ Required probe areas:
 | Performance | Cached search returns compact results under 200 ms for normal local mailbox sizes. |
 | Debuggability | Local API requests can be inspected as JSON. |
 | Maintainability | IMAP library can be swapped by replacing one adapter. |
-| Context efficiency | Default result sets avoid full bodies and quoted history. |
+| Context efficiency | Default result sets avoid full bodies and embedded previous replies. |
 | Offline behavior | Remote failure returns local approved cache with safe stale-result metadata. |
 
 ## 11. Risks And Technical Debt

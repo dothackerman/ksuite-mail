@@ -119,6 +119,22 @@ Credential file:
 
 Agent/user processes must not be able to read the credential file.
 
+First-version file shape:
+
+```json
+{
+  "version": 1,
+  "secrets": {
+    "/ksuite-mail/rs_info/password": {
+      "type": "password",
+      "value": "example-app-password"
+    }
+  }
+}
+```
+
+The `password_ref.id` value in `config.toml` maps exactly to a key under `secrets`. The daemon must reject missing ids, unsupported secret types, malformed JSON, or secrets files with broader permissions than `0600`.
+
 ### NFR-SEC-004 Secret Backends
 
 Acceptable first local options:
@@ -318,7 +334,7 @@ Avoid by default:
 
 - full bodies in search results
 - full threads
-- quoted histories
+- embedded previous replies
 - attachment contents
 
 Unread/seen state is not a first-version agent requirement.
@@ -485,5 +501,16 @@ Infomaniak IMAP behavior must be tested for:
 - UIDVALIDITY
 - UIDNEXT
 - CONDSTORE/HIGHESTMODSEQ support
+
+Behavior checks that depend on mailbox content or folder state must be run against controlled fixture messages in a test account or test folder. If a controlled fixture is unavailable, the result must be recorded as inconclusive.
+
+Minimum fixture coverage:
+
+- one message whose `From` matches a configured domain
+- one message whose `To` matches a configured domain
+- one message whose `Cc` matches a configured domain
+- one sent message with matching `Bcc` if the provider exposes it
+- one non-matching message that must remain invisible
+- UID spacing or enough message volume to test UID range search behavior
 
 The local cache schema may remain generic IMAP-based, but optimizations must not assume unsupported Infomaniak capabilities.

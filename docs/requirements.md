@@ -97,7 +97,7 @@ Result:
 
 - Returns headers and a bounded body preview.
 - Re-checks the policy boundary before returning content.
-- Omits quoted history unless requested.
+- Omits embedded previous replies unless explicitly requested and allowed by policy.
 
 ### UC-004 Retrieve Bounded Message Body
 
@@ -129,7 +129,7 @@ Result:
 
 - Returns compact thread timeline.
 - Includes only policy-approved messages.
-- Omits repeated quoted content by default.
+- Omits repeated embedded previous replies by default.
 
 ### UC-006 Build Agent Context Pack
 
@@ -217,7 +217,7 @@ domains = ["regenerativ.ch"]
 Result:
 
 - Exposes only messages where configured `From`, `To`, `Cc`, or `Bcc` headers match `regenerativ.ch`.
-- Does not treat body text, quoted history, signatures, or attachment contents as policy matches.
+- Does not treat body text, embedded previous replies, signatures, or attachment contents as policy matches.
 - Uses server-side IMAP `UID SEARCH` before any `FETCH`.
 - Does not download, cache, index, or expose non-matching private messages.
 
@@ -362,8 +362,10 @@ More content requires explicit flags:
 - `--preview`
 - `--max-chars`
 - `--thread-brief`
-- `--include-quotes`
+- `--include-embedded-replies`
 - `--fields`
+
+Embedded previous replies means older thread content copied inside a newer email body, for example the text below "On DATE, NAME wrote:". First-version `domain` accounts should not expose embedded previous replies unless a later product decision explicitly accepts that privacy risk.
 
 Message flags may be returned as diagnostic metadata when available, but first-version agent workflows must not depend on unread/seen state.
 
@@ -417,3 +419,16 @@ The probe may check:
 - `Bcc` availability in sent mail
 
 Probe output must use safe structured diagnostics such as booleans, counts, capability names, folder names, and redacted error codes.
+
+Behavior checks must use a controlled test account or folder when the answer depends on message content or folder state.
+
+Minimum useful fixture coverage:
+
+- a message whose `From` matches a configured domain
+- a message whose `To` matches a configured domain
+- a message whose `Cc` matches a configured domain
+- a sent message with available `Bcc` matching a configured domain, if Infomaniak exposes that header
+- a non-matching message that must remain invisible
+- enough UID spacing to test UID range search behavior
+
+When fixtures are missing, the probe must return an `inconclusive` result for affected checks instead of reporting provider behavior as supported or unsupported.

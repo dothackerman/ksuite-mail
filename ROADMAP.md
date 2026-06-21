@@ -43,7 +43,8 @@ For `domain` accounts:
 - Run server-side `UID SEARCH HEADER` before any `FETCH`.
 - Fetch only matching UIDs.
 - Re-validate exact domains locally before cache writes or responses.
-- Body text, quoted history, signatures, attachment contents, `Sender`, `Reply-To`, and transport headers are not policy-match inputs.
+- Body text, embedded previous replies, signatures, attachment contents, `Sender`, `Reply-To`, and transport headers are not policy-match inputs.
+- Embedded previous replies means older thread content copied inside a newer email body, for example the text below "On DATE, NAME wrote:".
 
 ## Refresh And Cache
 
@@ -84,17 +85,24 @@ Allowed probe areas:
 
 Probe output must be sanitized and should report capabilities, booleans, counts, and safe diagnostics only.
 
+Behavior checks must use a controlled test account or folder with known fixture messages when a boolean answer depends on message content or folder state. Without controlled fixtures, the probe should report that result as inconclusive rather than treating generic mailbox behavior as proven.
+
 ## Implementation Slices
 
-1. Bootstrap secure local init and deployment boundary.
-2. Build daemon skeleton, Unix socket API, doctor, and credential boundary.
-3. Implement local cache and read-only command surface against fake/test mail adapters.
-4. Probe Infomaniak IMAP through the fixed sanitized daemon checklist.
+Every implementation slice should reference an existing GitHub issue. If no issue exists yet, this roadmap must document the next product or technical step before implementation starts.
+
+| Order | Issue | Slice | Next step |
+|---|---|---|---|
+| 1 | [#1](https://github.com/dothackerman/ksuite-mail/issues/1) | Bootstrap secure local init and deployment boundary. | In implementation. Do not expand scope without a follow-up issue. |
+| 2 | [#2](https://github.com/dothackerman/ksuite-mail/issues/2) | Build daemon skeleton, Unix socket API, doctor, and credential boundary. | Implement after issue #1 lands. |
+| 3 | [#3](https://github.com/dothackerman/ksuite-mail/issues/3) | Implement local cache and read-only command surface against fake/test mail adapters. | Keep live Infomaniak behavior behind fake/test adapters until issue #4 proves provider behavior. |
+| 4 | [#4](https://github.com/dothackerman/ksuite-mail/issues/4) | Probe Infomaniak IMAP through the fixed sanitized daemon checklist. | Run against controlled fixtures and update architecture/NFRs if Infomaniak behavior diverges from generic IMAP assumptions. |
 
 ## Future Work
 
-- MCP/OpenClaw adapter around the stable CLI/API.
-- Sending, drafting, and replying with explicit human confirmation.
-- Attachment metadata and content retrieval policy, if needed.
-- Broader provider support only after the Infomaniak-first implementation is reliable.
-
+| Future item | Existing issue | Next step |
+|---|---|---|
+| MCP/OpenClaw adapter around the stable CLI/API. | None. | Create an issue after the CLI/API contract is stable. |
+| Sending, drafting, and replying with explicit human confirmation. | None. | Make product decisions for confirmation UX, audit logs, failure handling, and rollback limits before implementation. |
+| Attachment metadata and content retrieval policy. | None. | Decide whether agents need attachment names, metadata, or contents, then define privacy rules before implementation. |
+| Broader provider support. | None. | Revisit only after the Infomaniak-first implementation is reliable and provider-probe results are documented. |
