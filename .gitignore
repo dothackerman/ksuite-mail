@@ -1,0 +1,44 @@
+# Build outputs
+/bin/
+/dist/
+/build/
+*.exe
+*.out
+*.test
+
+# Go workspace/cache artifacts
+/vendor/
+coverage.out
+coverage.html
+
+# Local runtime state
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+/tmp/
+/var/
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+config.local.toml
+secrets.json
+*.secret
+*.pem
+*.key
+
+# Logs
+*.log
+logs/
+
+# Editor and OS files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
