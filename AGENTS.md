@@ -23,6 +23,25 @@ If an issue lacks precise references, add a comment proposing the needed `UC-*`/
 
 If code and docs disagree, stop and update the docs or ask for a product decision before implementation continues.
 
+## Branches
+
+Each issue gets its own branch.
+
+Branch naming:
+
+```text
+issue-<id>-<issue-title-as-kebab-case>
+```
+
+Examples:
+
+```text
+issue-1-bootstrap-secure-local-init-and-deployment-boundary
+issue-4-probe-infomaniak-imap-through-fixed-sanitized-daemon-checklist
+```
+
+Do not combine unrelated issues on one branch. If an issue uncovers prerequisite work, open or update a separate issue and branch unless the prerequisite is tiny and clearly part of the original slice.
+
 ## Security Boundaries
 
 - Keep credentials daemon-side only.
@@ -107,3 +126,87 @@ Probe output must be sanitized and should report capabilities, booleans, counts,
 - Prefer small, auditable interfaces over broad abstractions.
 - Add tests for policy boundaries, search-before-fetch ordering, credential redaction, structured stale results, and cache invalidation.
 - Keep JSON responses compact and stable for agent consumption.
+
+## Quality Gates
+
+The repository should expose these canonical commands once Go code exists:
+
+```bash
+make fmt
+make lint
+make test
+make test-e2e
+make vuln
+make security
+make gate
+```
+
+Expected meanings:
+
+- `make fmt`: run modern Go formatting, at minimum `gofmt` or `go fmt ./...`; add `goimports` when imports need automatic grouping.
+- `make lint`: run `go vet ./...` and `golangci-lint run ./...`.
+- `make test`: run normal unit and integration tests with `go test ./...`.
+- `make test-e2e`: run hermetic end-to-end tests. Use fake IMAP servers, fixtures, or local test daemons; do not require real Infomaniak credentials.
+- `make vuln`: run Go dependency and vulnerability checks. Use `go mod verify` plus `govulncheck ./...`. Go has no exact built-in `npm audit` equivalent; `govulncheck` is the intended vulnerability scanner.
+- `make security`: run Semgrep locally when available, for example `semgrep scan --config auto`.
+- `make gate`: run the full local pre-PR gate: formatting check, lint, unit/integration tests, vulnerability checks, security checks, and hermetic e2e tests.
+
+If a command cannot run in the current environment, document the blocker in the PR and keep the Makefile target behavior explicit.
+
+## Git Hooks
+
+Add and maintain project-local hook scripts when the Go module is introduced.
+
+Expected behavior:
+
+- pre-commit: run formatter and linter checks before allowing a commit.
+- pre-push: run tests before pushing.
+
+The hooks should call the canonical Makefile targets instead of duplicating command logic.
+
+Recommended mapping:
+
+```bash
+pre-commit -> make fmt && make lint
+pre-push   -> make test
+```
+
+If hermetic e2e tests are fast and reliable, pre-push may also run `make test-e2e`. Live Infomaniak probing must not run automatically from hooks.
+
+## Pull Request CI
+
+Every PR should run GitHub Actions with:
+
+- formatting check
+- Go linting
+- `go test ./...`
+- hermetic e2e tests
+- Go module verification and vulnerability scan: `go mod verify` and `govulncheck ./...`
+- Semgrep security scan
+
+Do not run live Infomaniak mailbox probes in normal PR CI. Keep live provider probing as an explicit local/manual diagnostic through the fixed sanitized probe path.
+
+## Commit Hygiene
+
+Group changes semantically.
+
+Prefer small iterative commits that each leave the branch in a coherent state:
+
+- docs-only decisions in their own commit
+- setup/build plumbing in its own commit
+- daemon behavior in its own commit
+- cache or policy logic in its own commit
+- tests with the behavior they validate, unless separating them improves review clarity
+
+Push iteratively while working so remote state reflects meaningful progress.
+
+## PR Workflow
+
+When an issue implementation is complete:
+
+1. Run `make gate`.
+2. Push the issue branch.
+3. Open a draft PR.
+4. Perform a self-review of the diff, docs, tests, logs, and security boundaries.
+5. Fix issues found during self-review with follow-up commits on the same branch.
+6. Mark the PR ready for review only after self-review passes and the quality gate is green or documented with a concrete blocker.
