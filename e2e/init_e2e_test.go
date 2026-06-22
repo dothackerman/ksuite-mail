@@ -62,7 +62,6 @@ func TestInitPreparesBoundaryEndToEnd(t *testing.T) {
 	checks := map[string]os.FileMode{
 		filepath.Join(staging, "etc/ksuite-mail"):              0o750,
 		filepath.Join(staging, "var/lib/ksuite-mail"):          0o700,
-		filepath.Join(staging, "run/ksuite-mail"):              0o750,
 		filepath.Join(staging, "etc/ksuite-mail/config.toml"):  0o640,
 		filepath.Join(staging, "etc/ksuite-mail/secrets.json"): 0o600,
 	}
@@ -78,7 +77,7 @@ func TestInitPreparesBoundaryEndToEnd(t *testing.T) {
 	}
 
 	// The printed systemd units must carry the hardening boundary.
-	for _, want := range []string{"User=ksuite-mail", "SocketGroup=testgroup", "NoNewPrivileges=true"} {
+	for _, want := range []string{"User=ksuite-mail", "SocketGroup=testgroup", "NoNewPrivileges=true", "ListenStream=/run/ksuite-mail.sock"} {
 		if !strings.Contains(string(out), want) {
 			t.Errorf("init output missing %q", want)
 		}

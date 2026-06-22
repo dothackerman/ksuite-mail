@@ -50,9 +50,10 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=%s %s
-RuntimeDirectory=ksuite-mail
-RuntimeDirectoryMode=0750
+# Only the persistent cache is writable; the socket lives in /run and is
+# created and owned by systemd from the .socket unit (Shape A), so the daemon
+# needs no writable runtime directory of its own.
+ReadWritePaths=%s
 UMask=0077
 
 [Install]
@@ -60,7 +61,7 @@ WantedBy=multi-user.target
 `,
 		layout.InstalledDaem, layout.ConfigFile,
 		layout.ServiceUser, layout.ServiceGroup,
-		layout.StateDir, layout.RuntimeDir,
+		layout.StateDir,
 	)
 }
 

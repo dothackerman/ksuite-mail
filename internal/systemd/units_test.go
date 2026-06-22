@@ -27,11 +27,19 @@ func TestRenderServiceHardening(t *testing.T) {
 		"ProtectHome=true",
 		"UMask=0077",
 		"ExecStart=/usr/local/bin/ksuite-maild --config /etc/ksuite-mail/config.toml",
-		"ReadWritePaths=/var/lib/ksuite-mail /run/ksuite-mail",
+		"ReadWritePaths=/var/lib/ksuite-mail",
 	} {
 		if !strings.Contains(u.Service, want) {
 			t.Errorf("service unit missing %q\n%s", want, u.Service)
 		}
+	}
+
+	// Shape A: the socket lives directly in /run, created by systemd from the
+	// .socket unit. The service must NOT own a private RuntimeDirectory for it,
+	// because systemd would chown that directory to the service's own group on
+	// every boot and lock the socket access group out (PR #7 review, P1).
+	if strings.Contains(u.Service, "RuntimeDirectory") {
+		t.Errorf("service unit must not declare RuntimeDirectory under Shape A\n%s", u.Service)
 	}
 }
 
@@ -41,7 +49,7 @@ func TestRenderSocketBoundary(t *testing.T) {
 		t.Fatalf("Render: %v", err)
 	}
 	for _, want := range []string{
-		"ListenStream=/run/ksuite-mail/ksuite-mail.sock",
+		"ListenStream=/run/ksuite-mail.sock",
 		"SocketUser=ksuite-mail",
 		"SocketGroup=oriol",
 		"SocketMode=0660",

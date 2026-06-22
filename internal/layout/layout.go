@@ -27,13 +27,16 @@ const (
 // ARCH-DEP-001). These are logical locations; tests prefix them with a
 // temporary root.
 const (
-	ConfigDir     = "/etc/ksuite-mail"
-	ConfigFile    = "/etc/ksuite-mail/config.toml"
-	SecretsFile   = "/etc/ksuite-mail/secrets.json"
-	StateDir      = "/var/lib/ksuite-mail"
-	DBFile        = "/var/lib/ksuite-mail/mail.db"
-	RuntimeDir    = "/run/ksuite-mail"
-	SocketPath    = "/run/ksuite-mail/ksuite-mail.sock"
+	ConfigDir   = "/etc/ksuite-mail"
+	ConfigFile  = "/etc/ksuite-mail/config.toml"
+	SecretsFile = "/etc/ksuite-mail/secrets.json"
+	StateDir    = "/var/lib/ksuite-mail"
+	DBFile      = "/var/lib/ksuite-mail/mail.db"
+	// SocketPath sits directly in /run (Shape A): /run is world-traversable, so
+	// there is no enclosing directory whose ownership could drift on reboot. The
+	// socket is created by systemd from the .socket unit, which gates access via
+	// SocketGroup/SocketMode — not by a separate init-created directory.
+	SocketPath    = "/run/ksuite-mail.sock"
 	InstalledCLI  = "/usr/local/bin/ksuite-mail"
 	InstalledDaem = "/usr/local/bin/ksuite-maild"
 	// SystemdUnitDir is where service/socket units are installed.
@@ -65,8 +68,7 @@ type FileSpec struct {
 	Owner Owner
 }
 
-// Dirs returns the directories init must create, in creation order, given the
-// socket access group.
+// Dirs returns the persistent directories init must create, in creation order.
 //
 // Rationale for the modes:
 //   - ConfigDir 0750 root:ksuite-mail — the service group must traverse it to
@@ -74,13 +76,13 @@ type FileSpec struct {
 //     must not list it.
 //   - StateDir 0700 ksuite-mail:ksuite-mail — only the daemon user may read the
 //     cache directory (acceptance: cache not readable by the socket group).
-//   - RuntimeDir 0750 ksuite-mail:<access-group> — the socket group must
-//     traverse it to reach the socket, but must not read the daemon's files.
-func Dirs(accessGroup string) []DirSpec {
+//
+// The runtime socket directory is intentionally absent: under Shape A the
+// socket lives directly in volatile /run and is managed entirely by systemd.
+func Dirs() []DirSpec {
 	return []DirSpec{
 		{Path: ConfigDir, Mode: 0o750, Owner: Owner{User: "root", Group: ServiceGroup}},
 		{Path: StateDir, Mode: 0o700, Owner: Owner{User: ServiceUser, Group: ServiceGroup}},
-		{Path: RuntimeDir, Mode: 0o750, Owner: Owner{User: ServiceUser, Group: accessGroup}},
 	}
 }
 

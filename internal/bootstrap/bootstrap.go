@@ -111,7 +111,7 @@ func Run(opts Options, deps Deps) (*Result, error) {
 	if err := r.ensureServiceUser(); err != nil {
 		return nil, err
 	}
-	if err := r.createDirectories(accessGroup); err != nil {
+	if err := r.createDirectories(); err != nil {
 		return nil, err
 	}
 
@@ -119,10 +119,14 @@ func Run(opts Options, deps Deps) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := r.ensureConfig(account); err != nil {
-		return nil, err
-	}
-	if err := r.ensureSecrets(account); err != nil {
+	if account == nil {
+		if err := r.ensureBoundaryConfig(); err != nil {
+			return nil, err
+		}
+		if err := r.ensureBoundarySecrets(); err != nil {
+			return nil, err
+		}
+	} else if err := r.ensureAccount(account); err != nil {
 		return nil, err
 	}
 	if err := r.handleUnits(accessGroup); err != nil {
@@ -141,6 +145,13 @@ func (r *runner) resolveAccessGroup() (string, error) {
 		g, err := r.deps.Users.PrimaryGroupName(u)
 		if err != nil {
 			return "", fmt.Errorf("derive access group from user %q: %w", u, err)
+		}
+		// Deriving "root" means init was run directly as root rather than via
+		// sudo as a human; silently using it would yield a root-only socket that
+		// no normal user (or agent) can reach. Refuse and make the operator
+		// choose. An explicit --access-group is honored above, even if "root".
+		if g == "root" {
+			return "", fmt.Errorf("refusing to derive a root socket access group from user %q: run via sudo as a normal user, or pass --access-group explicitly", u)
 		}
 		if g != "" {
 			return g, nil
@@ -166,8 +177,8 @@ func (r *runner) ensureServiceUser() error {
 	return nil
 }
 
-func (r *runner) createDirectories(accessGroup string) error {
-	for _, d := range layout.Dirs(accessGroup) {
+func (r *runner) createDirectories() error {
+	for _, d := range layout.Dirs() {
 		p := r.path(d.Path)
 		if err := os.MkdirAll(p, d.Mode); err != nil {
 			return fmt.Errorf("create dir %s: %w", d.Path, err)
@@ -210,56 +221,153 @@ func (r *runner) buildAccount() (*config.Account, error) {
 	return &acct, nil
 }
 
-func (r *runner) ensureConfig(account *config.Account) error {
+// ensureBoundaryConfig seeds or validates config.toml when no account is being
+// added. A re-run that merely validates an existing config must not clobber
+// operator comments or formatting, so it is left byte-for-byte untouched.
+func (r *runner) ensureBoundaryConfig() error {
 	spec := layout.ConfigFileSpec()
 	p := r.path(spec.Path)
 
-	cfg, existed, err := r.loadOrSeedConfig(p)
+	_, existed, err := r.loadOrSeedConfig(p)
 	if err != nil {
 		return err
 	}
-
-	if account != nil {
-		for i := range cfg.Mail.Accounts {
-			if cfg.Mail.Accounts[i].ID == account.ID {
-				return fmt.Errorf("account %q already present in config", account.ID)
-			}
-		}
-		cfg.Mail.Accounts = append(cfg.Mail.Accounts, *account)
-		if err := config.Validate(cfg); err != nil {
-			return fmt.Errorf("config invalid after adding account: %w", err)
-		}
-		r.res.AccountAdded = account.ID
-	}
-
-	// Only write when content actually changes: a re-run that merely validates
-	// an existing config must not clobber operator comments or formatting.
-	if !existed || account != nil {
-		var data []byte
-		if !existed && account == nil {
-			// Pristine starter document with the documented commented example.
-			if data, err = config.StarterDocument(); err != nil {
-				return err
-			}
-		} else {
-			if data, err = config.Marshal(cfg); err != nil {
-				return err
-			}
+	if !existed {
+		// Pristine starter document with the documented commented example.
+		data, err := config.StarterDocument()
+		if err != nil {
+			return err
 		}
 		if err := writeFileAtomic(p, data, spec.Mode); err != nil {
 			return fmt.Errorf("write config: %w", err)
 		}
 	}
-
-	// Always normalize permissions and ownership, even when validating.
-	if err := os.Chmod(p, spec.Mode); err != nil {
-		return fmt.Errorf("chmod config: %w", err)
-	}
-	if err := r.deps.Chown.Chown(p, spec.Owner); err != nil {
-		return fmt.Errorf("chown config: %w", err)
+	if err := r.normalizePerms(spec); err != nil {
+		return err
 	}
 	r.res.ConfigCreated = !existed
 	r.logf("Config %s mode %#o owner %s:%s (%s)", spec.Path, spec.Mode, spec.Owner.User, spec.Owner.Group, createdOrValidated(existed))
+	return nil
+}
+
+// ensureBoundarySecrets initializes or validates the (possibly empty) secrets
+// store when no account is being added.
+func (r *runner) ensureBoundarySecrets() error {
+	spec := layout.SecretsFileSpec()
+	p := r.path(spec.Path)
+
+	store, existed, err := r.loadOrInitSecrets(p)
+	if err != nil {
+		return err
+	}
+	if !existed {
+		if err := writeSecretStore(p, store, spec.Mode); err != nil {
+			return fmt.Errorf("write secrets: %w", err)
+		}
+	}
+	if err := r.normalizePerms(spec); err != nil {
+		return err
+	}
+	r.res.SecretsCreated = !existed
+	r.logf("Secrets %s mode %#o owner %s:%s (%s)", spec.Path, spec.Mode, spec.Owner.User, spec.Owner.Group, createdOrValidated(existed))
+	return nil
+}
+
+// ensureAccount adds one account and its credential as a single transactional
+// unit. The credential is acquired BEFORE anything is persisted, so a failed or
+// cancelled prompt never leaves a configured account whose secret is missing.
+// The secret is then written before the config entry, which makes a retry after
+// a partial previous run recover the missing half instead of dead-locking on an
+// "already present" check (PR #7 review, P2).
+func (r *runner) ensureAccount(account *config.Account) error {
+	cfgSpec := layout.ConfigFileSpec()
+	secSpec := layout.SecretsFileSpec()
+	cfgPath := r.path(cfgSpec.Path)
+	secPath := r.path(secSpec.Path)
+
+	cfg, cfgExisted, err := r.loadOrSeedConfig(cfgPath)
+	if err != nil {
+		return err
+	}
+	store, secExisted, err := r.loadOrInitSecrets(secPath)
+	if err != nil {
+		return err
+	}
+
+	key := account.PasswordRef.ID
+	accountInConfig := false
+	for i := range cfg.Mail.Accounts {
+		if cfg.Mail.Accounts[i].ID == account.ID {
+			accountInConfig = true
+			break
+		}
+	}
+	_, secretInStore := store.Secrets[key]
+	if accountInConfig && secretInStore {
+		return fmt.Errorf("account %q already present", account.ID)
+	}
+
+	if r.deps.Prompt == nil {
+		return errors.New("an account was provided but no interactive prompter is available")
+	}
+	secret, err := r.deps.Prompt.PromptSecret(fmt.Sprintf("Mailbox password for %s", account.Email))
+	if err != nil {
+		return fmt.Errorf("read credential: %w", err)
+	}
+	if len(secret) == 0 {
+		return errors.New("empty password: refusing to store a credential that cannot authenticate")
+	}
+	store.Secrets[key] = string(secret)
+	// Best-effort scrub of the prompt buffer. The string copy above still lives
+	// on the heap until garbage-collected; Go offers no way to pin and wipe it,
+	// so the file mode (0600, service-owned) remains the real protection.
+	for i := range secret {
+		secret[i] = 0
+	}
+
+	// Persist the secret first (recovery ordering, see doc comment).
+	if err := writeSecretStore(secPath, store, secSpec.Mode); err != nil {
+		return fmt.Errorf("write secrets: %w", err)
+	}
+	if err := r.normalizePerms(secSpec); err != nil {
+		return err
+	}
+	r.res.SecretsCreated = !secExisted
+
+	if !accountInConfig {
+		cfg.Mail.Accounts = append(cfg.Mail.Accounts, *account)
+		if err := config.Validate(cfg); err != nil {
+			return fmt.Errorf("config invalid after adding account: %w", err)
+		}
+	}
+	data, err := config.Marshal(cfg)
+	if err != nil {
+		return err
+	}
+	if err := writeFileAtomic(cfgPath, data, cfgSpec.Mode); err != nil {
+		return fmt.Errorf("write config: %w", err)
+	}
+	if err := r.normalizePerms(cfgSpec); err != nil {
+		return err
+	}
+	r.res.ConfigCreated = !cfgExisted
+	r.res.AccountAdded = account.ID
+
+	r.logf("Config %s mode %#o owner %s:%s (account %q added)", cfgSpec.Path, cfgSpec.Mode, cfgSpec.Owner.User, cfgSpec.Owner.Group, account.ID)
+	r.logf("Secrets %s mode %#o owner %s:%s (credential stored)", secSpec.Path, secSpec.Mode, secSpec.Owner.User, secSpec.Owner.Group)
+	return nil
+}
+
+// normalizePerms applies the exact mode and ownership for a boundary file. It is
+// always run, even on a validating re-run, so drift is corrected.
+func (r *runner) normalizePerms(spec layout.FileSpec) error {
+	p := r.path(spec.Path)
+	if err := os.Chmod(p, spec.Mode); err != nil {
+		return fmt.Errorf("chmod %s: %w", spec.Path, err)
+	}
+	if err := r.deps.Chown.Chown(p, spec.Owner); err != nil {
+		return fmt.Errorf("chown %s: %w", spec.Path, err)
+	}
 	return nil
 }
 
@@ -281,53 +389,6 @@ func (r *runner) loadOrSeedConfig(p string) (cfg *config.Config, existed bool, e
 	default:
 		return nil, false, fmt.Errorf("open config: %w", err)
 	}
-}
-
-func (r *runner) ensureSecrets(account *config.Account) error {
-	spec := layout.SecretsFileSpec()
-	p := r.path(spec.Path)
-
-	store, existed, err := r.loadOrInitSecrets(p)
-	if err != nil {
-		return err
-	}
-
-	changed := !existed
-	if account != nil {
-		key := account.PasswordRef.ID
-		if _, ok := store.Secrets[key]; ok {
-			return fmt.Errorf("secret %q already present", key)
-		}
-		if r.deps.Prompt == nil {
-			return errors.New("an account was provided but no interactive prompter is available")
-		}
-		secret, err := r.deps.Prompt.PromptSecret(fmt.Sprintf("Mailbox password for %s", account.Email))
-		if err != nil {
-			return fmt.Errorf("read credential: %w", err)
-		}
-		store.Secrets[key] = string(secret)
-		// Best-effort scrub of the prompt buffer.
-		for i := range secret {
-			secret[i] = 0
-		}
-		changed = true
-	}
-
-	// Only rewrite the secrets file when it is new or a secret was added.
-	if changed {
-		if err := writeSecretStore(p, store, spec.Mode); err != nil {
-			return fmt.Errorf("write secrets: %w", err)
-		}
-	}
-	if err := os.Chmod(p, spec.Mode); err != nil {
-		return fmt.Errorf("chmod secrets: %w", err)
-	}
-	if err := r.deps.Chown.Chown(p, spec.Owner); err != nil {
-		return fmt.Errorf("chown secrets: %w", err)
-	}
-	r.res.SecretsCreated = !existed
-	r.logf("Secrets %s mode %#o owner %s:%s (%s)", spec.Path, spec.Mode, spec.Owner.User, spec.Owner.Group, createdOrValidated(existed))
-	return nil
 }
 
 func (r *runner) loadOrInitSecrets(p string) (store *secretStore, existed bool, err error) {
