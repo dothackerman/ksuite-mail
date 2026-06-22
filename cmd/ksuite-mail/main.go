@@ -18,9 +18,10 @@ Usage:
   ksuite-mail <command> [flags]
 
 Commands:
-  init    Prepare the local service boundary (run as root: sudo ksuite-mail init)
+  init     Prepare the local service boundary (run as root: sudo ksuite-mail init)
+  doctor   Diagnose the local setup via the daemon (JSON output)
 
-Run 'ksuite-mail init --help' for init flags.
+Run 'ksuite-mail <command> --help' for command flags.
 `
 
 func main() {
@@ -35,6 +36,8 @@ func main() {
 			fmt.Fprintf(os.Stderr, "ksuite-mail init: %v\n", err)
 			os.Exit(1)
 		}
+	case "doctor":
+		os.Exit(runDoctor(os.Args[2:]))
 	case "-h", "--help", "help":
 		fmt.Print(usage)
 	default:
