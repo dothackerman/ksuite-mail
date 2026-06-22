@@ -1,8 +1,9 @@
-// Command ksuite-mail is the thin CLI front end. In this slice it implements
-// the privileged `init` setup command only (UC-008). The CLI never resolves or
-// transmits mailbox credentials for normal operation; `init` is the documented
-// exception that prompts for a credential on the TTY and writes it directly to
-// the daemon-owned secrets file (ARCH-CON-002, NFR-OPS-000).
+// Command ksuite-mail is the thin CLI front end. It implements the privileged
+// `init` setup command (UC-008) and the `doctor` diagnostic, which talks to the
+// daemon over the Unix socket (UC-007). The CLI never resolves or transmits
+// mailbox credentials for normal operation; `init` is the documented exception
+// that prompts for a credential on the TTY and writes it directly to the
+// daemon-owned secrets file (ARCH-CON-002, NFR-OPS-000).
 package main
 
 import (
