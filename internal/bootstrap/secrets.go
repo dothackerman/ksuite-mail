@@ -33,6 +33,9 @@ func loadSecretStore(path string) (*secretStore, error) {
 	if err := json.Unmarshal(data, &s); err != nil {
 		return nil, fmt.Errorf("parse secrets file: %w", err)
 	}
+	if s.Version != secretStoreVersion {
+		return nil, fmt.Errorf("unsupported secrets file version %d (want %d)", s.Version, secretStoreVersion)
+	}
 	if s.Secrets == nil {
 		s.Secrets = map[string]string{}
 	}

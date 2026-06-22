@@ -22,6 +22,14 @@ const (
 	PolicyDomain = "domain"
 )
 
+// Supported password_ref backend. This is the only resolver init writes and the
+// only one the daemon can resolve, so any other value is rejected at validation
+// rather than deferred to a runtime credential-resolution failure (NFR-SEC-002).
+const (
+	PasswordSourceFile    = "file"
+	PasswordProviderLocal = "local"
+)
+
 // Config is the root of config.toml.
 type Config struct {
 	Mail Mail `toml:"mail"`
@@ -37,11 +45,13 @@ type Mail struct {
 // Account is a single mailbox configuration. Credentials are never stored
 // inline; PasswordRef points at a daemon-resolvable secret.
 type Account struct {
-	ID          string      `toml:"id"`
-	Email       string      `toml:"email"`
-	Host        string      `toml:"host"`
-	Port        int         `toml:"port"`
-	TLS         bool        `toml:"tls"`
+	ID    string `toml:"id"`
+	Email string `toml:"email"`
+	Host  string `toml:"host"`
+	Port  int    `toml:"port"`
+	// TLS is a pointer so an omitted `tls` key (nil) is distinguishable from an
+	// intentional `tls = false`; validation requires it to be present (FR-002).
+	TLS         *bool       `toml:"tls"`
 	Username    string      `toml:"username"`
 	PasswordRef PasswordRef `toml:"password_ref"`
 	Policy      string      `toml:"policy"`
@@ -116,8 +126,17 @@ func Validate(c *Config) error {
 		if a.Username == "" {
 			problems = append(problems, fmt.Errorf("%s: username is required", label))
 		}
+		if a.TLS == nil {
+			problems = append(problems, fmt.Errorf("%s: tls is required (set true or false explicitly)", label))
+		}
 		if a.PasswordRef.ID == "" {
 			problems = append(problems, fmt.Errorf("%s: password_ref.id is required", label))
+		}
+		if a.PasswordRef.Source != PasswordSourceFile {
+			problems = append(problems, fmt.Errorf("%s: password_ref.source %q unsupported (want %q)", label, a.PasswordRef.Source, PasswordSourceFile))
+		}
+		if a.PasswordRef.Provider != PasswordProviderLocal {
+			problems = append(problems, fmt.Errorf("%s: password_ref.provider %q unsupported (want %q)", label, a.PasswordRef.Provider, PasswordProviderLocal))
 		}
 
 		switch a.Policy {

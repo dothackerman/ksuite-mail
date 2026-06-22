@@ -2,6 +2,13 @@ package bootstrap
 
 import "github.com/dothackerman/ksuite-mail/internal/layout"
 
+// UserInfo carries the identity properties init needs to confirm an existing
+// account is a dedicated service user before trusting it with credentials.
+type UserInfo struct {
+	UID     int
+	HomeDir string
+}
+
 // UserProvisioner abstracts OS user and group management so init can be tested
 // hermetically without creating real system accounts.
 type UserProvisioner interface {
@@ -16,6 +23,9 @@ type UserProvisioner interface {
 	// PrimaryGroupName returns the name of a user's primary group. It is used to
 	// derive the default socket access group from the invoking human user.
 	PrimaryGroupName(user string) (string, error)
+	// LookupUser returns identity details for an existing account, used to verify
+	// a pre-existing service user really is a dedicated system account.
+	LookupUser(name string) (UserInfo, error)
 }
 
 // Chowner applies intended ownership to a path. Implementations map owner names

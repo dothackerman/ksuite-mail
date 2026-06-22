@@ -17,6 +17,7 @@ type fakeUsers struct {
 	users        map[string]bool
 	groups       map[string]bool
 	primaryGroup map[string]string
+	info         map[string]UserInfo
 	created      []string
 }
 
@@ -25,6 +26,7 @@ func newFakeUsers() *fakeUsers {
 		users:        map[string]bool{},
 		groups:       map[string]bool{"oriol": true, "ksuite-mail": true},
 		primaryGroup: map[string]string{"oriol": "oriol"},
+		info:         map[string]UserInfo{},
 	}
 }
 
@@ -37,6 +39,7 @@ func (f *fakeUsers) EnsureSystemUser(name, _, _ string) error {
 	return nil
 }
 func (f *fakeUsers) PrimaryGroupName(user string) (string, error) { return f.primaryGroup[user], nil }
+func (f *fakeUsers) LookupUser(name string) (UserInfo, error)     { return f.info[name], nil }
 
 type fakeChowner struct {
 	intents map[string]layout.Owner // canonical path -> owner
@@ -371,6 +374,41 @@ func TestRunAllowsExplicitRootAccessGroup(t *testing.T) {
 	}
 }
 
+// If a normal interactive account named "ksuite-mail" already exists (e.g. a
+// human user), init must not adopt it and chown the credential file/cache to it.
+// It must verify the existing account is a dedicated system user (PR #7, Codex
+// P2 "Reject a non-dedicated existing service user").
+func TestRunRejectsNonDedicatedExistingUser(t *testing.T) {
+	root := t.TempDir()
+	users := newFakeUsers()
+	users.users["ksuite-mail"] = true
+	users.info["ksuite-mail"] = UserInfo{UID: 1001, HomeDir: "/home/ksuite-mail"}
+	deps := Deps{Users: users, Chown: &fakeChowner{intents: map[string]layout.Owner{}, root: root}}
+
+	_, err := Run(Options{Root: root, InvokingUser: "oriol"}, deps)
+	if err == nil || !strings.Contains(err.Error(), "dedicated") {
+		t.Fatalf("expected refusal for non-dedicated existing user, got %v", err)
+	}
+}
+
+// A pre-existing dedicated system account (system uid range, service home) is
+// accepted on a re-run without being recreated.
+func TestRunAcceptsDedicatedExistingUser(t *testing.T) {
+	root := t.TempDir()
+	users := newFakeUsers()
+	users.users["ksuite-mail"] = true
+	users.info["ksuite-mail"] = UserInfo{UID: 991, HomeDir: layout.ServiceHome}
+	deps := Deps{Users: users, Chown: &fakeChowner{intents: map[string]layout.Owner{}, root: root}}
+
+	res, err := Run(Options{Root: root, InvokingUser: "oriol"}, deps)
+	if err != nil {
+		t.Fatalf("Run with valid existing user: %v", err)
+	}
+	if res.ServiceUserCreated {
+		t.Fatal("existing dedicated user must not be recreated")
+	}
+}
+
 func TestRunRejectsInvalidAccountBeforePrompting(t *testing.T) {
 	root := t.TempDir()
 	prompter := &fakePrompter{secret: "x"}
@@ -385,6 +423,19 @@ func TestRunRejectsInvalidAccountBeforePrompting(t *testing.T) {
 	}
 	if prompter.calls != 0 {
 		t.Fatalf("prompter must not be called for an invalid account; calls=%d", prompter.calls)
+	}
+}
+
+// A secrets file with an unrecognized schema version must be rejected rather
+// than loaded blindly, so a future format change can't be silently misread
+// (PR #7 review, B3).
+func TestLoadSecretStoreRejectsUnknownVersion(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "secrets.json")
+	if err := os.WriteFile(p, []byte(`{"version":99,"secrets":{}}`), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if _, err := loadSecretStore(p); err == nil || !strings.Contains(err.Error(), "version") {
+		t.Fatalf("expected version error, got %v", err)
 	}
 }
 

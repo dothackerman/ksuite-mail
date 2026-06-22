@@ -166,6 +166,9 @@ func (r *runner) ensureServiceUser() error {
 		return fmt.Errorf("check service user: %w", err)
 	}
 	if exists {
+		if err := r.verifyDedicatedServiceUser(); err != nil {
+			return err
+		}
 		r.logf("Service user %q already present", layout.ServiceUser)
 		return nil
 	}
@@ -174,6 +177,29 @@ func (r *runner) ensureServiceUser() error {
 	}
 	r.res.ServiceUserCreated = true
 	r.logf("Created system user %q", layout.ServiceUser)
+	return nil
+}
+
+// systemUIDMax is the upper bound (exclusive) of the conventional system-account
+// uid range on Debian/Ubuntu (SYS_UID_MAX = 999). An account at or above it is a
+// regular interactive user, not a dedicated service account.
+const systemUIDMax = 1000
+
+// verifyDedicatedServiceUser refuses to adopt a pre-existing "ksuite-mail"
+// account that is not a dedicated system user, because init would otherwise
+// chown the credential file and cache to an interactive account that could then
+// read daemon secrets and cached mail (PR #7 review, Codex P2).
+func (r *runner) verifyDedicatedServiceUser() error {
+	info, err := r.deps.Users.LookupUser(layout.ServiceUser)
+	if err != nil {
+		return fmt.Errorf("inspect existing service user %q: %w", layout.ServiceUser, err)
+	}
+	if info.UID >= systemUIDMax {
+		return fmt.Errorf("existing user %q (uid %d) is not a dedicated system account; refusing to grant it the credential boundary. Remove or rename it, or use a different service user", layout.ServiceUser, info.UID)
+	}
+	if info.HomeDir != "" && info.HomeDir != layout.ServiceHome {
+		return fmt.Errorf("existing user %q has home %q, not the dedicated service home %q; refusing to grant it the credential boundary", layout.ServiceUser, info.HomeDir, layout.ServiceHome)
+	}
 	return nil
 }
 
@@ -202,12 +228,13 @@ func (r *runner) buildAccount() (*config.Account, error) {
 		return nil, nil
 	}
 	s := r.opts.Account
+	tls := s.TLS
 	acct := config.Account{
 		ID:          s.ID,
 		Email:       s.Email,
 		Host:        s.Host,
 		Port:        s.Port,
-		TLS:         s.TLS,
+		TLS:         &tls,
 		Username:    s.Username,
 		PasswordRef: config.PasswordRef{Source: "file", Provider: "local", ID: secretKey(s.ID)},
 		Policy:      s.Policy,
