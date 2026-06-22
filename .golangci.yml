@@ -1,0 +1,17 @@
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  default: standard
+  enable:
+    - misspell
+    - unconvert
+    - bodyclose
+  exclusions:
+    rules:
+      # Tests may ignore returned errors on best-effort cleanup.
+      - path: _test\.go$
+        linters:
+          - errcheck
