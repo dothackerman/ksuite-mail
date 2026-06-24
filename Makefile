@@ -1,8 +1,7 @@
 SHELL := /usr/bin/env bash
 
 GO_FILES := $(shell find . -type f -name '*.go' -not -path './vendor/*' -not -path './.git/*' 2>/dev/null)
-
-.PHONY: fmt fmt-check lint test test-e2e vuln security gate install-hooks
+.PHONY: fmt fmt-check lint test test-e2e vuln security gate install-hooks build
 
 fmt:
 	@if [ -z "$(GO_FILES)" ]; then \
@@ -89,4 +88,9 @@ gate: fmt-check lint test test-e2e vuln security
 
 install-hooks:
 	@scripts/install-git-hooks.sh
+
+build:
+	@mkdir -p bin
+	go build -o bin/ksuite-mail  ./cmd/ksuite-mail
+	go build -o bin/ksuite-maild ./cmd/ksuite-maild
 
