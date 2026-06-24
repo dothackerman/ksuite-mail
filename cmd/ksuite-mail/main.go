@@ -1,8 +1,9 @@
-// Command ksuite-mail is the thin CLI front end. In this slice it implements
-// the privileged `init` setup command only (UC-008). The CLI never resolves or
-// transmits mailbox credentials for normal operation; `init` is the documented
-// exception that prompts for a credential on the TTY and writes it directly to
-// the daemon-owned secrets file (ARCH-CON-002, NFR-OPS-000).
+// Command ksuite-mail is the thin CLI front end. It implements the privileged
+// `init` setup command (UC-008) and the `doctor` diagnostic, which talks to the
+// daemon over the Unix socket (UC-007). The CLI never resolves or transmits
+// mailbox credentials for normal operation; `init` is the documented exception
+// that prompts for a credential on the TTY and writes it directly to the
+// daemon-owned secrets file (ARCH-CON-002, NFR-OPS-000).
 package main
 
 import (
@@ -18,9 +19,10 @@ Usage:
   ksuite-mail <command> [flags]
 
 Commands:
-  init    Prepare the local service boundary (run as root: sudo ksuite-mail init)
+  init     Prepare the local service boundary (run as root: sudo ksuite-mail init)
+  doctor   Diagnose the local setup via the daemon (JSON output)
 
-Run 'ksuite-mail init --help' for init flags.
+Run 'ksuite-mail <command> --help' for command flags.
 `
 
 func main() {
@@ -35,6 +37,8 @@ func main() {
 			fmt.Fprintf(os.Stderr, "ksuite-mail init: %v\n", err)
 			os.Exit(1)
 		}
+	case "doctor":
+		os.Exit(runDoctor(os.Args[2:]))
 	case "-h", "--help", "help":
 		fmt.Print(usage)
 	default:

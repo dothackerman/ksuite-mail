@@ -1,24 +1,53 @@
-// Command ksuite-maild is the privileged daemon that owns mailbox credentials,
-// IMAP access, and the local cache. Its full skeleton (Unix-socket API, doctor,
-// credential resolver) is built in implementation slice 2.
+// Command ksuite-maild is the privileged daemon that owns mailbox credentials
+// and the local cache. In this slice it serves the health and doctor endpoints
+// over a Unix domain socket; mail access arrives in later slices.
 //
-// This slice establishes the executable and the deployment boundary only: the
-// binary exists at the documented path so the systemd units rendered by
-// `ksuite-mail init` resolve, but it does not yet serve requests.
+// In production systemd activates the socket and passes the listening
+// descriptor; for development and tests the daemon binds the --socket path
+// itself. Either way the CLI never receives credentials (ARCH-CON-002).
 package main
 
 import (
+	"context"
 	"flag"
-	"fmt"
+	"log/slog"
 	"os"
+	"os/signal"
+	"syscall"
 
+	"github.com/dothackerman/ksuite-mail/internal/daemon"
 	"github.com/dothackerman/ksuite-mail/internal/layout"
 )
 
 func main() {
 	fs := flag.NewFlagSet("ksuite-maild", flag.ExitOnError)
-	config := fs.String("config", layout.ConfigFile, "path to config.toml")
+	configPath := fs.String("config", layout.ConfigFile, "path to config.toml")
+	secretsPath := fs.String("secrets", layout.SecretsFile, "path to the daemon-readable secrets file")
+	stateDir := fs.String("state-dir", layout.StateDir, "path to the daemon state/cache directory")
+	socketPath := fs.String("socket", layout.SocketPath, "Unix socket path (ignored under systemd socket activation)")
 	_ = fs.Parse(os.Args[1:])
 
-	fmt.Fprintf(os.Stderr, "ksuite-maild: daemon skeleton arrives in implementation slice 2 (config %s)\n", *config)
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+	ln, fromSystemd, err := daemon.Listen(*socketPath)
+	if err != nil {
+		log.Error("could not open daemon socket", "err", err)
+		os.Exit(1)
+	}
+	log.Info("ksuite-maild listening", "from_systemd", fromSystemd, "socket", *socketPath)
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	srv := daemon.New(daemon.Options{
+		ConfigPath:  *configPath,
+		SecretsPath: *secretsPath,
+		StateDir:    *stateDir,
+		Logger:      log,
+	})
+	if err := srv.Serve(ctx, ln); err != nil {
+		log.Error("daemon stopped with error", "err", err)
+		os.Exit(1)
+	}
+	log.Info("ksuite-maild stopped")
 }
