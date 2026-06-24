@@ -13,12 +13,17 @@ import (
 	"strings"
 )
 
+// version is injected at build time via -ldflags "-X main.version=<tag>".
+// It defaults to "dev" when the binary is built without the flag.
+var version = "dev"
+
 const usage = `ksuite-mail - local Infomaniak K-Mail gateway CLI
 
 Usage:
   ksuite-mail <command> [flags]
 
 Commands:
+  install  Copy binaries to their installed paths (run as root: sudo ./ksuite-mail install)
   init     Prepare the local service boundary (run as root: sudo ksuite-mail init)
   doctor   Diagnose the local setup via the daemon (JSON output)
 
@@ -32,6 +37,11 @@ func main() {
 	}
 
 	switch os.Args[1] {
+	case "install":
+		if err := runInstallBinaries(os.Args[2:]); err != nil {
+			fmt.Fprintf(os.Stderr, "ksuite-mail install: %v\n", err)
+			os.Exit(1)
+		}
 	case "init":
 		if err := runInit(os.Args[2:]); err != nil {
 			fmt.Fprintf(os.Stderr, "ksuite-mail init: %v\n", err)
@@ -39,6 +49,8 @@ func main() {
 		}
 	case "doctor":
 		os.Exit(runDoctor(os.Args[2:]))
+	case "--version", "-version":
+		fmt.Println(version)
 	case "-h", "--help", "help":
 		fmt.Print(usage)
 	default:

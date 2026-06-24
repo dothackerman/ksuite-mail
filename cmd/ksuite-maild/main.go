@@ -10,6 +10,7 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -19,13 +20,22 @@ import (
 	"github.com/dothackerman/ksuite-mail/internal/layout"
 )
 
+// version is injected at build time via -ldflags "-X main.version=<tag>".
+var version = "dev"
+
 func main() {
 	fs := flag.NewFlagSet("ksuite-maild", flag.ExitOnError)
 	configPath := fs.String("config", layout.ConfigFile, "path to config.toml")
 	secretsPath := fs.String("secrets", layout.SecretsFile, "path to the daemon-readable secrets file")
 	stateDir := fs.String("state-dir", layout.StateDir, "path to the daemon state/cache directory")
 	socketPath := fs.String("socket", layout.SocketPath, "Unix socket path (ignored under systemd socket activation)")
+	showVersion := fs.Bool("version", false, "print version and exit")
 	_ = fs.Parse(os.Args[1:])
+
+	if *showVersion {
+		fmt.Println(version)
+		return
+	}
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
