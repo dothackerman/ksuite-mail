@@ -1,6 +1,8 @@
 SHELL := /usr/bin/env bash
 
 GO_FILES := $(shell find . -type f -name '*.go' -not -path './vendor/*' -not -path './.git/*' 2>/dev/null)
+VERSION ?= dev
+
 .PHONY: fmt fmt-check lint test test-e2e vuln security gate install-hooks build
 
 fmt:
@@ -91,6 +93,6 @@ install-hooks:
 
 build:
 	@mkdir -p bin
-	go build -o bin/ksuite-mail  ./cmd/ksuite-mail
-	go build -o bin/ksuite-maild ./cmd/ksuite-maild
+	go build -ldflags "-X main.version=$(VERSION)" -o bin/ksuite-mail  ./cmd/ksuite-mail
+	go build -ldflags "-X main.version=$(VERSION)" -o bin/ksuite-maild ./cmd/ksuite-maild
 

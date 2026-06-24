@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/dothackerman/ksuite-mail/internal/config"
 	"github.com/dothackerman/ksuite-mail/internal/layout"
 )
 
@@ -436,6 +437,73 @@ func TestLoadSecretStoreRejectsUnknownVersion(t *testing.T) {
 	}
 	if _, err := loadSecretStore(p); err == nil || !strings.Contains(err.Error(), "version") {
 		t.Fatalf("expected version error, got %v", err)
+	}
+}
+
+// Adding a second account with a different ID must append it to config and
+// store its credential without disturbing the first account.
+func TestRunAddsSecondAccount(t *testing.T) {
+	root := t.TempDir()
+
+	// First account.
+	deps1, _, _ := newDeps(root, &fakePrompter{secret: "pw-first"})
+	res1, err := Run(Options{Root: root, InvokingUser: "oriol", Account: &AccountSeed{
+		ID: "first", Email: "first@example.com", Host: "mail.example.com",
+		Port: 993, TLS: true, Username: "first@example.com",
+		Policy: "full", Folders: []string{"INBOX"},
+	}}, deps1)
+	if err != nil {
+		t.Fatalf("first Run: %v", err)
+	}
+	if res1.AccountAdded != "first" {
+		t.Fatalf("AccountAdded = %q, want first", res1.AccountAdded)
+	}
+
+	// Second account — different ID, different credential.
+	deps2, _, _ := newDeps(root, &fakePrompter{secret: "pw-second"})
+	res2, err := Run(Options{Root: root, InvokingUser: "oriol", Account: &AccountSeed{
+		ID: "second", Email: "second@example.com", Host: "mail.example.com",
+		Port: 993, TLS: true, Username: "second@example.com",
+		Policy: "full", Folders: []string{"INBOX"},
+	}}, deps2)
+	if err != nil {
+		t.Fatalf("second Run: %v", err)
+	}
+	if res2.AccountAdded != "second" {
+		t.Fatalf("AccountAdded = %q, want second", res2.AccountAdded)
+	}
+
+	// Both accounts must be in config.
+	f, err := os.Open(filepath.Join(root, layout.ConfigFile))
+	if err != nil {
+		t.Fatalf("open config: %v", err)
+	}
+	defer func() { _ = f.Close() }()
+	cfg, err := config.Load(f)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if len(cfg.Mail.Accounts) != 2 {
+		t.Fatalf("config has %d accounts, want 2", len(cfg.Mail.Accounts))
+	}
+	ids := map[string]bool{}
+	for _, a := range cfg.Mail.Accounts {
+		ids[a.ID] = true
+	}
+	if !ids["first"] || !ids["second"] {
+		t.Fatalf("config accounts = %v, want [first second]", ids)
+	}
+
+	// Both credentials must be in the secrets store.
+	store, err := loadSecretStore(filepath.Join(root, layout.SecretsFile))
+	if err != nil {
+		t.Fatalf("loadSecretStore: %v", err)
+	}
+	if store.Secrets[secretKey("first")] != "pw-first" {
+		t.Fatal("first credential missing or wrong")
+	}
+	if store.Secrets[secretKey("second")] != "pw-second" {
+		t.Fatal("second credential missing or wrong")
 	}
 }
 
