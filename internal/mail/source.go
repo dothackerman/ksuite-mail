@@ -1,0 +1,29 @@
+package mail
+
+import (
+	"context"
+
+	"github.com/dothackerman/ksuite-mail/internal/config"
+)
+
+// UIDRange scopes adapter queries.
+type UIDRange struct {
+	Min uint64
+	Max uint64
+}
+
+// RemoteFolderState carries IMAP metadata returned by SelectFolder.
+type RemoteFolderState struct {
+	UIDVALIDITY   uint64
+	UIDNEXT       uint64
+	HighestModSeq int64
+}
+
+// Source is the narrow adapter interface that hides IMAP details.
+type Source interface {
+	SelectFolder(ctx context.Context, acct config.Account, folder string) (RemoteFolderState, error)
+	SearchAllowed(ctx context.Context, acct config.Account, folder string, header string, value string, scope UIDRange) ([]UID, error)
+	ListUIDs(ctx context.Context, acct config.Account, folder string, scope UIDRange) ([]UID, error)
+	FetchEnvelopes(ctx context.Context, acct config.Account, folder string, uids []UID) ([]MessageEnvelope, error)
+	FetchBodyPreview(ctx context.Context, acct config.Account, folder string, uid UID, maxBytes int) (string, error)
+}

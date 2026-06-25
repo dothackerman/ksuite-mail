@@ -1,0 +1,267 @@
+package refresh_test
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	"github.com/dothackerman/ksuite-mail/internal/cache"
+	"github.com/dothackerman/ksuite-mail/internal/config"
+	"github.com/dothackerman/ksuite-mail/internal/mail"
+	"github.com/dothackerman/ksuite-mail/internal/mailfake"
+	"github.com/dothackerman/ksuite-mail/internal/refresh"
+)
+
+func TestDomainRefreshUsesSearchBeforeFetch(t *testing.T) {
+	cfg := &config.Config{
+		Mail: config.Mail{
+			Accounts: []config.Account{
+				{
+					ID:       "acct",
+					Email:    "acct@example.com",
+					Host:     "imap.example.com",
+					Port:     993,
+					TLS:      boolPtr(true),
+					Username: "acct@example.com",
+					PasswordRef: config.PasswordRef{
+						Source:   config.PasswordSourceFile,
+						Provider: config.PasswordProviderLocal,
+						ID:       "/ksuite-mail/acct/password",
+					},
+					Policy:  config.PolicyDomain,
+					Domains: []string{"example.com"},
+					Folders: []string{"INBOX"},
+				},
+			},
+		},
+	}
+
+	ad := mailfake.NewAdapter(map[string]map[string][]mailfake.Message{
+		"acct": {
+			"INBOX": {
+				{
+					UID: 9,
+					Envelope: mail.MessageEnvelope{
+						UID:     9,
+						From:    "alice@example.com",
+						Subject: "hello",
+					},
+					VisibleByPolicy: true,
+				},
+			},
+		},
+	})
+
+	repo := mustOpenRepoForRefresh(t)
+	res, err := refresh.Refresh(context.Background(), cfg, repo, ad, refresh.RefreshOptions{
+		MaxCandidates: 10,
+	})
+	if err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	if res.Meta.Attempted != true || res.Meta.RemoteOK != true {
+		t.Fatalf("refresh meta = %+v", res.Meta)
+	}
+	calls := ad.CallsSnapshot()
+	if len(calls) < 2 {
+		t.Fatalf("calls = %#v, want at least select/search/fetch", calls)
+	}
+	if calls[0].Method != "select" {
+		t.Fatalf("first call = %+v, want select", calls[0])
+	}
+	if calls[1].Method != "search" {
+		t.Fatalf("second call = %+v, want search", calls[1])
+	}
+	fetchSeen := false
+	for _, call := range calls {
+		if call.Method == "fetch" {
+			fetchSeen = true
+			break
+		}
+		if call.Method == "select" {
+			continue
+		}
+	}
+	if !fetchSeen {
+		t.Fatalf("fetch not called: calls=%+v", calls)
+	}
+}
+
+func TestDomainRefreshSkipsNonPolicyMessages(t *testing.T) {
+	cfg := &config.Config{
+		Mail: config.Mail{
+			Accounts: []config.Account{
+				{
+					ID:       "acct",
+					Email:    "acct@example.com",
+					Host:     "imap.example.com",
+					Port:     993,
+					TLS:      boolPtr(true),
+					Username: "acct@example.com",
+					PasswordRef: config.PasswordRef{
+						Source:   config.PasswordSourceFile,
+						Provider: config.PasswordProviderLocal,
+						ID:       "/ksuite-mail/acct/password",
+					},
+					Policy:  config.PolicyDomain,
+					Domains: []string{"example.com"},
+					Folders: []string{"INBOX"},
+				},
+			},
+		},
+	}
+
+	ad := mailfake.NewAdapter(map[string]map[string][]mailfake.Message{
+		"acct": {
+			"INBOX": {
+				{
+					UID: 8,
+					Envelope: mail.MessageEnvelope{
+						UID:     8,
+						From:    "outside@other.com",
+						To:      "you@other.com",
+						Subject: "no match",
+					},
+					VisibleByPolicy: true,
+				},
+			},
+		},
+	})
+	ad.SetSearchResult("acct", "INBOX", "From", "example.com", []mail.UID{8})
+
+	repo := mustOpenRepoForRefresh(t)
+	_, err := refresh.Refresh(context.Background(), cfg, repo, ad, refresh.RefreshOptions{MaxCandidates: 10})
+	if err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+
+	msgs, err := repo.ListMessages(cache.QueryFilter{AccountID: "acct", Folder: "INBOX"})
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	if len(msgs) != 0 {
+		t.Fatalf("expected no cached messages, got %d", len(msgs))
+	}
+}
+
+func TestRefreshHandlesMessageMoveAcrossFolders(t *testing.T) {
+	cfg := &config.Config{
+		Mail: config.Mail{
+			Accounts: []config.Account{
+				{
+					ID:       "acct",
+					Email:    "acct@example.com",
+					Host:     "imap.example.com",
+					Port:     993,
+					TLS:      boolPtr(true),
+					Username: "acct@example.com",
+					PasswordRef: config.PasswordRef{
+						Source:   config.PasswordSourceFile,
+						Provider: config.PasswordProviderLocal,
+						ID:       "/ksuite-mail/acct/password",
+					},
+					Policy:  config.PolicyFull,
+					Folders: []string{"INBOX", "Sent"},
+				},
+			},
+		},
+	}
+
+	repo := mustOpenRepoForRefresh(t)
+	if err := repo.UpsertMessage(mail.CachedMessage{
+		ID:                  mail.PublicID("acct", "INBOX", 123, 1),
+		AccountID:           "acct",
+		Folder:              "INBOX",
+		UIDVALIDITY:         123,
+		UID:                 1,
+		MessageID:           "<inbox>",
+		ThreadKey:           "thread-1",
+		Subject:             "moved",
+		From:                "a@example.com",
+		To:                  "b@example.com",
+		Cc:                  "",
+		Bcc:                 "",
+		Date:                time.Now(),
+		Flags:               "",
+		HasAttachments:      false,
+		Snippet:             "moved",
+		BodyText:            "moved",
+		VisibleReason:       "policy_full",
+		ContentHash:         "h",
+		LastLoadedOrChecked: time.Now(),
+		FirstLoadedAt:       time.Now(),
+	}); err != nil {
+		t.Fatalf("seed old message: %v", err)
+	}
+	if err := repo.UpsertFolderState(cache.FolderState{
+		AccountID:             "acct",
+		Folder:                "INBOX",
+		UIDVALIDITY:           999,
+		UIDNEXT:               2,
+		LastRefreshAttempted:  ptrTime(time.Now()),
+		LastSuccessfulRefresh: ptrTime(time.Now()),
+	}); err != nil {
+		t.Fatalf("seed folder state: %v", err)
+	}
+
+	ad := mailfake.NewAdapter(map[string]map[string][]mailfake.Message{
+		"acct": {
+			"INBOX": {},
+			"Sent": {
+				{
+					UID: 1,
+					Envelope: mail.MessageEnvelope{
+						UID:       1,
+						From:      "a@example.com",
+						To:        "b@example.com",
+						Subject:   "moved",
+						ThreadKey: "thread-1",
+						MessageID: "<moved>",
+						Date:      time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+					},
+					VisibleByPolicy: true,
+				},
+			},
+		},
+	})
+
+	if _, err := refresh.Refresh(context.Background(), cfg, repo, ad, refresh.RefreshOptions{MaxCandidates: 10}); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+
+	inbox, err := repo.ListMessages(cache.QueryFilter{AccountID: "acct", Folder: "INBOX"})
+	if err != nil {
+		t.Fatalf("ListMessages INBOX: %v", err)
+	}
+	if len(inbox) != 0 {
+		t.Fatalf("expected moved message removed from INBOX, got %d", len(inbox))
+	}
+	sent, err := repo.ListMessages(cache.QueryFilter{AccountID: "acct", Folder: "Sent"})
+	if err != nil {
+		t.Fatalf("ListMessages Sent: %v", err)
+	}
+	if len(sent) != 1 {
+		t.Fatalf("expected moved message in Sent, got %d", len(sent))
+	}
+}
+
+func mustOpenRepoForRefresh(t *testing.T) *cache.Repository {
+	t.Helper()
+	repo, err := cache.NewRepository(cache.DBOptions{Path: mustTempDB(t)})
+	if err != nil {
+		t.Fatalf("NewRepository: %v", err)
+	}
+	return repo
+}
+
+func mustTempDB(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	return dir + "/mail.db"
+}
+
+func boolPtr(v bool) *bool { return &v }
+
+func ptrTime(t time.Time) *time.Time {
+	return &t
+}

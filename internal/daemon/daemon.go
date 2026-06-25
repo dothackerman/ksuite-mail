@@ -3,9 +3,9 @@
 // the daemon resolves secrets internally and the CLI only ever sees the safe,
 // content-free envelopes defined in internal/api.
 //
-// This slice serves liveness and diagnostics only — GET /v1/health and
-// POST /v1/doctor. There is deliberately no raw IMAP command surface
-// (FR-011): mail endpoints arrive in later slices.
+// This slice now includes read-only command surfaces used by the CLI: list,
+// search, show, thread, and context. It keeps health and doctor behavior
+// unchanged.
 package daemon
 
 import (
@@ -16,23 +16,48 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/dothackerman/ksuite-mail/internal/api"
+	"github.com/dothackerman/ksuite-mail/internal/cache"
+	"github.com/dothackerman/ksuite-mail/internal/config"
 	"github.com/dothackerman/ksuite-mail/internal/doctor"
+	"github.com/dothackerman/ksuite-mail/internal/mail"
+	"github.com/dothackerman/ksuite-mail/internal/refresh"
 )
 
 // systemdListenFDStart is the first file descriptor systemd passes to a
 // socket-activated service (SD_LISTEN_FDS_START).
 const systemdListenFDStart = 3
 
+const (
+	defaultLimit      = 100
+	defaultBudget     = 1200
+	defaultContextMax = 1200
+)
+
+// source matches the narrow read-only adapter interface.
+type source interface {
+	SelectFolder(ctx context.Context, acct config.Account, folder string) (mail.RemoteFolderState, error)
+	SearchAllowed(ctx context.Context, acct config.Account, folder string, header string, value string, scope mail.UIDRange) ([]mail.UID, error)
+	ListUIDs(ctx context.Context, acct config.Account, folder string, scope mail.UIDRange) ([]mail.UID, error)
+	FetchEnvelopes(ctx context.Context, acct config.Account, folder string, uids []mail.UID) ([]mail.MessageEnvelope, error)
+	FetchBodyPreview(ctx context.Context, acct config.Account, folder string, uid mail.UID, maxBytes int) (string, error)
+}
+
+// SourceFactory builds a source from runtime config.
+type SourceFactory func(ctx context.Context, cfg *config.Config) (source, error)
+
 // Options configures the daemon's view of the deployment.
 type Options struct {
-	ConfigPath  string
-	SecretsPath string
-	StateDir    string
-	Logger      *slog.Logger
+	ConfigPath    string
+	SecretsPath   string
+	StateDir      string
+	Logger        *slog.Logger
+	SourceFactory SourceFactory
 }
 
 // Server serves the local API.
@@ -56,6 +81,11 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/health", s.handleHealth)
 	mux.HandleFunc("/v1/doctor", s.handleDoctor)
+	mux.HandleFunc("/v1/list", s.handleList)
+	mux.HandleFunc("/v1/search", s.handleSearch)
+	mux.HandleFunc("/v1/show", s.handleShow)
+	mux.HandleFunc("/v1/thread", s.handleThread)
+	mux.HandleFunc("/v1/context", s.handleContext)
 	mux.HandleFunc("/", s.handleNotFound)
 	return s.logRequests(mux)
 }
@@ -106,6 +136,381 @@ func (s *Server) handleDoctor(w http.ResponseWriter, r *http.Request) {
 		StateDir:    s.opts.StateDir,
 	})
 	s.writeOK(w, report)
+}
+
+func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		s.writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "use POST for /v1/list")
+		return
+	}
+	var req api.ListRequest
+	if err := decodeRequestBody(r, &req); err != nil {
+		s.writeError(w, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
+
+	cfg, repo, refreshRes, err := s.refreshAndLoad(r.Context())
+	if err != nil {
+		s.writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
+		return
+	}
+	defer func() { _ = repo.Close() }()
+
+	filter := cache.QueryFilter{
+		AccountID: accountFilter(req.Account),
+		Folder:    req.Folder,
+		Limit:     withDefault(cfg.Mail.DefaultLimit, req.Limit, defaultLimit),
+		Offset:    max(0, req.Offset),
+	}
+	messages, err := repo.ListMessages(filter)
+	if err != nil {
+		s.writeError(w, http.StatusInternalServerError, "internal_error", "could not query cache")
+		return
+	}
+	results := make([]api.MessageSummary, 0, len(messages))
+	for _, msg := range messages {
+		results = append(results, toMessageSummary(msg))
+	}
+
+	resp := api.ListResponse{
+		Results: results,
+		Refresh: refreshRes.Meta,
+	}
+	status := api.ReadStatus(refreshRes.Meta, refreshRes.Partial, len(results) > 0)
+	s.writeReadOK(w, status, resp, refreshRes.Warnings)
+}
+
+func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		s.writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "use POST for /v1/search")
+		return
+	}
+	var req api.SearchRequest
+	if err := decodeRequestBody(r, &req); err != nil {
+		s.writeError(w, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
+	if strings.TrimSpace(req.Query) == "" {
+		s.writeError(w, http.StatusBadRequest, "bad_request", "query is required")
+		return
+	}
+
+	cfg, repo, refreshRes, err := s.refreshAndLoad(r.Context())
+	if err != nil {
+		s.writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
+		return
+	}
+	defer func() { _ = repo.Close() }()
+
+	filter := cache.QueryFilter{
+		AccountID: accountFilter(req.Account),
+		Folder:    req.Folder,
+		Query:     req.Query,
+		Limit:     withDefault(cfg.Mail.DefaultLimit, req.Limit, defaultLimit),
+		Offset:    max(0, req.Offset),
+	}
+	messages, err := repo.SearchMessages(filter)
+	if err != nil {
+		s.writeError(w, http.StatusInternalServerError, "internal_error", "could not search cache")
+		return
+	}
+	results := make([]api.MessageSummary, 0, len(messages))
+	for _, msg := range messages {
+		results = append(results, toMessageSummary(msg))
+	}
+
+	resp := api.SearchResponse{
+		Results: results,
+		Refresh: refreshRes.Meta,
+	}
+	status := api.ReadStatus(refreshRes.Meta, refreshRes.Partial, len(results) > 0)
+	s.writeReadOK(w, status, resp, refreshRes.Warnings)
+}
+
+func (s *Server) handleShow(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		s.writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "use POST for /v1/show")
+		return
+	}
+	var req api.ShowRequest
+	if err := decodeRequestBody(r, &req); err != nil {
+		s.writeError(w, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
+	if strings.TrimSpace(req.ID) == "" {
+		s.writeError(w, http.StatusBadRequest, "bad_request", "id is required")
+		return
+	}
+
+	cfg, repo, refreshRes, err := s.refreshAndLoad(r.Context())
+	if err != nil {
+		s.writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
+		return
+	}
+	defer func() { _ = repo.Close() }()
+
+	msg, found, err := repo.GetByPublicID(req.ID)
+	if err != nil {
+		s.writeError(w, http.StatusInternalServerError, "internal_error", "could not read cache")
+		return
+	}
+	if !found {
+		s.writeError(w, http.StatusNotFound, "not_found", "message not found")
+		return
+	}
+
+	acct := accountByID(cfg, msg.AccountID)
+	if acct == nil {
+		s.writeError(w, http.StatusInternalServerError, "internal_error", "message account missing from configuration")
+		return
+	}
+
+	body := ""
+	includeBody := req.Preview
+	if includeBody {
+		body = msg.BodyText
+		if acct.Policy == config.PolicyDomain {
+			body = stripEmbeddedReplies(body)
+		}
+		maxChars := req.MaxChars
+		if maxChars <= 0 {
+			maxChars = refresh.DefaultPreviewBytes
+		}
+		body = truncateText(body, maxChars)
+	}
+
+	resp := api.ShowResponse{
+		Result:  toMessageDetail(msg, body, includeBody),
+		Refresh: refreshRes.Meta,
+	}
+	status := api.ReadStatus(refreshRes.Meta, refreshRes.Partial, true)
+	s.writeReadOK(w, status, resp, refreshRes.Warnings)
+}
+
+func (s *Server) handleThread(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		s.writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "use POST for /v1/thread")
+		return
+	}
+	var req api.ThreadRequest
+	if err := decodeRequestBody(r, &req); err != nil {
+		s.writeError(w, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
+	if strings.TrimSpace(req.ID) == "" {
+		s.writeError(w, http.StatusBadRequest, "bad_request", "id is required")
+		return
+	}
+
+	_, repo, refreshRes, err := s.refreshAndLoad(r.Context())
+	if err != nil {
+		s.writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
+		return
+	}
+	defer func() { _ = repo.Close() }()
+
+	seed, found, err := repo.GetByPublicID(req.ID)
+	if err != nil {
+		s.writeError(w, http.StatusInternalServerError, "internal_error", "could not read cache")
+		return
+	}
+	if !found {
+		s.writeError(w, http.StatusNotFound, "not_found", "message not found")
+		return
+	}
+	messages, err := repo.ThreadMessages(seed.AccountID, seed.ThreadKey)
+	if err != nil {
+		s.writeError(w, http.StatusInternalServerError, "internal_error", "could not read thread")
+		return
+	}
+
+	maxMessages := req.MaxMessages
+	if maxMessages <= 0 {
+		maxMessages = defaultLimit
+	}
+	results := make([]api.MessageSummary, 0, min(len(messages), maxMessages))
+	for i, msg := range messages {
+		if i >= maxMessages {
+			break
+		}
+		results = append(results, toMessageSummary(msg))
+	}
+
+	resp := api.ThreadResponse{
+		ThreadKey: seed.ThreadKey,
+		Messages:  results,
+		Refresh:   refreshRes.Meta,
+	}
+	status := api.ReadStatus(refreshRes.Meta, refreshRes.Partial, len(results) > 0)
+	s.writeReadOK(w, status, resp, refreshRes.Warnings)
+}
+
+func (s *Server) handleContext(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		s.writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "use POST for /v1/context")
+		return
+	}
+	var req api.ContextRequest
+	if err := decodeRequestBody(r, &req); err != nil {
+		s.writeError(w, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
+	if strings.TrimSpace(req.ID) == "" {
+		s.writeError(w, http.StatusBadRequest, "bad_request", "id is required")
+		return
+	}
+
+	cfg, repo, refreshRes, err := s.refreshAndLoad(r.Context())
+	if err != nil {
+		s.writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
+		return
+	}
+	defer func() { _ = repo.Close() }()
+
+	seed, found, err := repo.GetByPublicID(req.ID)
+	if err != nil {
+		s.writeError(w, http.StatusInternalServerError, "internal_error", "could not read cache")
+		return
+	}
+	if !found {
+		s.writeError(w, http.StatusNotFound, "not_found", "message not found")
+		return
+	}
+
+	acct := accountByID(cfg, seed.AccountID)
+	if acct == nil {
+		s.writeError(w, http.StatusInternalServerError, "internal_error", "message account missing from configuration")
+		return
+	}
+
+	msgs, err := repo.ThreadMessages(seed.AccountID, seed.ThreadKey)
+	if err != nil {
+		s.writeError(w, http.StatusInternalServerError, "internal_error", "could not read thread")
+		return
+	}
+	if len(msgs) == 0 {
+		s.writeError(w, http.StatusNotFound, "not_found", "thread is empty")
+		return
+	}
+
+	budget := req.Budget
+	if budget <= 0 {
+		budget = defaultBudget
+	}
+	timeline := make([]api.MessageSummary, 0, len(msgs))
+	var used int
+	for _, msg := range msgs {
+		item := toMessageSummary(msg)
+		if item.ID == seed.ID {
+			continue
+		}
+		if used+len(item.Snippet) > budget {
+			break
+		}
+		used += len(item.Snippet)
+		timeline = append(timeline, item)
+	}
+
+	seedBody := ""
+	if seed.BodyText != "" {
+		seedBody = seed.BodyText
+		if acct.Policy == config.PolicyDomain {
+			seedBody = stripEmbeddedReplies(seedBody)
+		}
+		seedBody = truncateText(seedBody, defaultContextMax)
+	}
+	resp := api.ContextResponse{
+		Seed:          toMessageDetail(seed, seedBody, true),
+		Timeline:      timeline,
+		Refresh:       refreshRes.Meta,
+		MessageBudget: budget,
+	}
+	status := api.ReadStatus(refreshRes.Meta, refreshRes.Partial, true)
+	s.writeReadOK(w, status, resp, refreshRes.Warnings)
+}
+
+func (s *Server) writeReadOK(w http.ResponseWriter, status string, payload any, warnings []refresh.Warning) {
+	apiWarnings := make([]api.Warning, 0, len(warnings))
+	for _, w := range warnings {
+		apiWarnings = append(apiWarnings, api.Warning{Code: w.Code, Message: w.Message})
+	}
+	env, err := api.OKWithStatus(status, payload, apiWarnings...)
+	if err != nil {
+		s.writeError(w, http.StatusInternalServerError, "internal_error", "could not build response")
+		return
+	}
+	s.writeJSON(w, http.StatusOK, env)
+}
+
+func (s *Server) refreshAndLoad(ctx context.Context) (*config.Config, *cache.Repository, refresh.Result, error) {
+	cfg, err := s.loadConfig()
+	if err != nil {
+		return nil, nil, refresh.Result{}, err
+	}
+	repo, err := s.openRepository()
+	if err != nil {
+		return nil, nil, refresh.Result{}, err
+	}
+	if err := cleanupExpired(repo, cfg); err != nil {
+		return nil, nil, refresh.Result{}, err
+	}
+
+	src, err := s.sourceForConfig(ctx, cfg)
+	if err != nil {
+		return nil, nil, refresh.Result{}, err
+	}
+	if src == nil {
+		return cfg, repo, refresh.Result{
+			Meta: cache.RefreshMeta{
+				Attempted: false,
+				RemoteOK:  true,
+			},
+		}, nil
+	}
+
+	res, err := refresh.Refresh(ctx, cfg, repo, src, refresh.RefreshOptions{
+		Now:           time.Now,
+		PreviewBytes:  refresh.DefaultPreviewBytes,
+		MaxCandidates: withDefault(cfg.Mail.DefaultLimit, 0, defaultLimit),
+	})
+	if err != nil {
+		return nil, nil, refresh.Result{}, err
+	}
+	return cfg, repo, res, nil
+}
+
+func (s *Server) sourceForConfig(ctx context.Context, cfg *config.Config) (source, error) {
+	if s.opts.SourceFactory == nil {
+		return nil, nil
+	}
+	return s.opts.SourceFactory(ctx, cfg)
+}
+
+func (s *Server) openRepository() (*cache.Repository, error) {
+	if err := cache.SeedFromStateDir(s.opts.StateDir); err != nil {
+		return nil, err
+	}
+	path := filepath.Join(s.opts.StateDir, "mail.db")
+	repo, err := cache.NewRepository(cache.DBOptions{Path: path})
+	if err != nil {
+		return nil, err
+	}
+	return repo, nil
+}
+
+func (s *Server) loadConfig() (*config.Config, error) {
+	raw, err := os.ReadFile(s.opts.ConfigPath)
+	if err != nil {
+		return nil, err
+	}
+	cfg, err := config.Load(strings.NewReader(string(raw)))
+	if err != nil {
+		return nil, err
+	}
+	if err := config.Validate(cfg); err != nil {
+		return nil, err
+	}
+	return cfg, nil
 }
 
 func (s *Server) handleNotFound(w http.ResponseWriter, _ *http.Request) {
@@ -216,4 +621,121 @@ func pathListener(socketPath string) (net.Listener, error) {
 		return nil, err
 	}
 	return ln, nil
+}
+
+func decodeRequestBody(r *http.Request, out any) error {
+	if r.Body == nil {
+		return errors.New("missing request body")
+	}
+	defer func() { _ = r.Body.Close() }()
+	decoder := json.NewDecoder(r.Body)
+	if err := decoder.Decode(out); err != nil {
+		return errors.New("malformed json")
+	}
+	return nil
+}
+
+func withDefault(cfgLimit, explicit, fallback int) int {
+	if explicit > 0 {
+		return explicit
+	}
+	if cfgLimit > 0 {
+		return cfgLimit
+	}
+	return fallback
+}
+
+func accountFilter(v string) string {
+	v = strings.TrimSpace(v)
+	if v == "" || strings.EqualFold(v, "all") {
+		return ""
+	}
+	return v
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func truncateText(s string, maxChars int) string {
+	if maxChars <= 0 || len(s) <= maxChars {
+		return s
+	}
+	return s[:maxChars]
+}
+
+func cleanupExpired(repo *cache.Repository, cfg *config.Config) error {
+	ttl := 90 * 24 * time.Hour
+	if strings.TrimSpace(cfg.Mail.CacheTTL) != "" {
+		parsed, err := config.ParseTTL(cfg.Mail.CacheTTL)
+		if err != nil {
+			return err
+		}
+		ttl = parsed
+	}
+	return repo.CleanupExpired(ttl)
+}
+
+func accountByID(cfg *config.Config, id string) *config.Account {
+	for i := range cfg.Mail.Accounts {
+		if cfg.Mail.Accounts[i].ID == id {
+			return &cfg.Mail.Accounts[i]
+		}
+	}
+	return nil
+}
+
+func toMessageSummary(m mail.CachedMessage) api.MessageSummary {
+	return api.MessageSummary{
+		ID:            m.ID,
+		Subject:       m.Subject,
+		From:          m.From,
+		To:            m.To,
+		Cc:            m.Cc,
+		Bcc:           m.Bcc,
+		ThreadKey:     m.ThreadKey,
+		Date:          m.Date,
+		Snippet:       m.Snippet,
+		VisibleReason: m.VisibleReason,
+	}
+}
+
+func toMessageDetail(m mail.CachedMessage, body string, includeBody bool) api.MessageDetail {
+	item := api.MessageDetail{
+		MessageSummary: toMessageSummary(m),
+		HasAttachments: m.HasAttachments,
+	}
+	if includeBody {
+		item.BodyText = body
+	}
+	return item
+}
+
+func stripEmbeddedReplies(body string) string {
+	if body == "" {
+		return body
+	}
+	lines := strings.Split(body, "\n")
+	out := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if isReplyBoundary(strings.TrimSpace(line)) {
+			break
+		}
+		out = append(out, line)
+	}
+	return strings.TrimSpace(strings.Join(out, "\n"))
+}
+
+func isReplyBoundary(line string) bool {
+	return strings.HasPrefix(line, "On ") && strings.Contains(line, "wrote:")
 }

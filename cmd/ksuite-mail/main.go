@@ -25,6 +25,12 @@ Usage:
 Commands:
   install  Copy binaries to their installed paths (run as root: sudo ./ksuite-mail install)
   init     Prepare the local service boundary (run as root: sudo ksuite-mail init)
+  inbox    List recent messages from INBOX
+  list     List cached messages
+  search   Search cached messages (FTS5-backed)
+  show     Show a cached message
+  thread   Show cached thread around a message
+  context  Show cached context around a message
   doctor   Diagnose the local setup via the daemon (JSON output)
 
 Run 'ksuite-mail <command> --help' for command flags.
@@ -37,6 +43,18 @@ func main() {
 	}
 
 	switch os.Args[1] {
+	case "inbox":
+		os.Exit(runInbox(os.Args[2:]))
+	case "list":
+		os.Exit(runList(os.Args[2:]))
+	case "search":
+		os.Exit(runSearch(os.Args[2:]))
+	case "show":
+		os.Exit(runShow(os.Args[2:]))
+	case "thread":
+		os.Exit(runThread(os.Args[2:]))
+	case "context":
+		os.Exit(runContext(os.Args[2:]))
 	case "install":
 		if err := runInstallBinaries(os.Args[2:]); err != nil {
 			fmt.Fprintf(os.Stderr, "ksuite-mail install: %v\n", err)
