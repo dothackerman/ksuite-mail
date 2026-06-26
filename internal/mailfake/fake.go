@@ -140,6 +140,15 @@ func (a *Adapter) SetUIDVALIDITY(account, folder string, uidvalidity uint64) {
 	a.seed[account][folder] = *fd
 }
 
+// SetHighestModSeq updates the folder high-water modification sequence.
+func (a *Adapter) SetHighestModSeq(account, folder string, hms int64) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	fd := a.ensureFolderLocked(account, folder)
+	fd.HMS = hms
+	a.seed[account][folder] = *fd
+}
+
 // DeleteMessage removes a UID from a folder.
 func (a *Adapter) DeleteMessage(account, folder string, uid mail.UID) {
 	a.mu.Lock()

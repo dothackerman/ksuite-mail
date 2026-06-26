@@ -178,6 +178,59 @@ func TestCleanupUsesLastLoadedOrCheckedForTTL(t *testing.T) {
 	}
 }
 
+func TestCleanupExpiredInvalidatesFolderStateForPurgedRows(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 1, 2, 12, 0, 0, 0, time.UTC)
+	repo := mustOpenRepoWithTime(t, filepath.Join(t.TempDir(), "mail.db"), now)
+	defer func() { _ = repo.Close() }()
+
+	old := now.Add(-100 * 24 * time.Hour)
+	if err := repo.UpsertMessage(mail.CachedMessage{
+		ID:                  "msg_expired_state",
+		AccountID:           "acct",
+		Folder:              "INBOX",
+		UIDVALIDITY:         10,
+		UID:                 9,
+		MessageID:           "<expired-state@case>",
+		ThreadKey:           "thread-state",
+		Subject:             "expired state",
+		From:                "alice@example.com",
+		To:                  "bob@example.com",
+		Date:                now,
+		Snippet:             "expired",
+		BodyText:            "expired",
+		VisibleReason:       "full",
+		ContentHash:         "c1",
+		FirstLoadedAt:       old,
+		LastLoadedOrChecked: old,
+	}); err != nil {
+		t.Fatalf("upsert expired: %v", err)
+	}
+	if err := repo.UpsertFolderState(FolderState{
+		AccountID:         "acct",
+		Folder:            "INBOX",
+		UIDVALIDITY:       10,
+		UIDNEXT:           10,
+		HighestModSeq:     22,
+		LastSeenUID:       9,
+		PolicyFingerprint: "full:",
+	}); err != nil {
+		t.Fatalf("upsert state: %v", err)
+	}
+
+	if err := repo.CleanupExpired(72 * time.Hour); err != nil {
+		t.Fatalf("CleanupExpired: %v", err)
+	}
+	state, err := repo.FolderState("acct", "INBOX")
+	if err != nil {
+		t.Fatalf("FolderState: %v", err)
+	}
+	if state != nil {
+		t.Fatalf("folder state survived TTL cleanup: %+v", state)
+	}
+}
+
 func TestDeleteByMessageRefAlsoRemovesFTSIndex(t *testing.T) {
 	t.Parallel()
 

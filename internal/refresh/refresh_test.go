@@ -347,6 +347,223 @@ func TestRefreshPreservesLatestSuccessfulTimestampWhenAllFoldersFail(t *testing.
 	}
 }
 
+func TestPartialRefreshKeepsRemoteOKFalse(t *testing.T) {
+	cfg := &config.Config{Mail: config.Mail{Accounts: []config.Account{{
+		ID:       "acct",
+		Email:    "acct@example.com",
+		Host:     "imap.example.com",
+		Port:     993,
+		TLS:      boolPtr(true),
+		Username: "acct@example.com",
+		PasswordRef: config.PasswordRef{
+			Source:   config.PasswordSourceFile,
+			Provider: config.PasswordProviderLocal,
+			ID:       "/ksuite-mail/acct/password",
+		},
+		Policy:  config.PolicyFull,
+		Folders: []string{"INBOX", "Sent"},
+	}}}}
+	repo := mustOpenRepoForRefresh(t)
+	ad := mailfake.NewAdapter(map[string]map[string][]mailfake.Message{
+		"acct": {
+			"INBOX": {{UID: 1, Envelope: mail.MessageEnvelope{UID: 1, From: "a@example.com", Subject: "ok"}, Body: "ok"}},
+			"Sent":  {},
+		},
+	})
+	ad.SetFailure("select", "acct", "Sent", "", context.DeadlineExceeded)
+
+	res, err := refresh.Refresh(context.Background(), cfg, repo, ad, refresh.RefreshOptions{})
+	if err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	if !res.Partial {
+		t.Fatalf("Partial = false, want true")
+	}
+	if res.Meta.RemoteOK {
+		t.Fatalf("RemoteOK = true, want false")
+	}
+	if res.Meta.LastSuccessfulRefreshAt == nil {
+		t.Fatalf("LastSuccessfulRefreshAt = nil, want successful folder timestamp")
+	}
+}
+
+func TestIncrementalRefreshRemovesDeletedExistingUIDsWhenDiscoveryComplete(t *testing.T) {
+	cfg := &config.Config{Mail: config.Mail{Accounts: []config.Account{{
+		ID:       "acct",
+		Email:    "acct@example.com",
+		Host:     "imap.example.com",
+		Port:     993,
+		TLS:      boolPtr(true),
+		Username: "acct@example.com",
+		PasswordRef: config.PasswordRef{
+			Source:   config.PasswordSourceFile,
+			Provider: config.PasswordProviderLocal,
+			ID:       "/ksuite-mail/acct/password",
+		},
+		Policy:  config.PolicyFull,
+		Folders: []string{"INBOX"},
+	}}}}
+	now := time.Now().UTC()
+	repo := mustOpenRepoForRefresh(t)
+	if err := repo.UpsertMessage(mail.CachedMessage{
+		ID:                  mail.PublicID("acct", "INBOX", 123, 1),
+		AccountID:           "acct",
+		Folder:              "INBOX",
+		UIDVALIDITY:         123,
+		UID:                 1,
+		MessageID:           "<deleted>",
+		ThreadKey:           "thread-delete",
+		Subject:             "deleted",
+		From:                "a@example.com",
+		To:                  "b@example.com",
+		Date:                now,
+		Snippet:             "deleted",
+		BodyText:            "deleted",
+		VisibleReason:       "policy_full",
+		ContentHash:         "h",
+		LastLoadedOrChecked: now,
+		FirstLoadedAt:       now,
+	}); err != nil {
+		t.Fatalf("seed cached message: %v", err)
+	}
+	if err := repo.UpsertFolderState(cache.FolderState{
+		AccountID:         "acct",
+		Folder:            "INBOX",
+		UIDVALIDITY:       123,
+		UIDNEXT:           3,
+		HighestModSeq:     0,
+		LastSeenUID:       2,
+		PolicyFingerprint: "full:",
+	}); err != nil {
+		t.Fatalf("seed folder state: %v", err)
+	}
+	ad := mailfake.NewAdapter(map[string]map[string][]mailfake.Message{
+		"acct": {"INBOX": {
+			{UID: 2, Envelope: mail.MessageEnvelope{UID: 2, From: "a@example.com", Subject: "kept"}, Body: "kept"},
+		}},
+	})
+
+	if _, err := refresh.Refresh(context.Background(), cfg, repo, ad, refresh.RefreshOptions{}); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	if _, ok, err := repo.GetByPublicID(mail.PublicID("acct", "INBOX", 123, 1)); err != nil {
+		t.Fatalf("GetByPublicID deleted: %v", err)
+	} else if ok {
+		t.Fatalf("deleted remote UID remained cached")
+	}
+}
+
+func TestFullRefreshCapsCandidatesWithoutRecordingCompleteState(t *testing.T) {
+	cfg := &config.Config{Mail: config.Mail{Accounts: []config.Account{{
+		ID:       "acct",
+		Email:    "acct@example.com",
+		Host:     "imap.example.com",
+		Port:     993,
+		TLS:      boolPtr(true),
+		Username: "acct@example.com",
+		PasswordRef: config.PasswordRef{
+			Source:   config.PasswordSourceFile,
+			Provider: config.PasswordProviderLocal,
+			ID:       "/ksuite-mail/acct/password",
+		},
+		Policy:  config.PolicyFull,
+		Folders: []string{"INBOX"},
+	}}}}
+	repo := mustOpenRepoForRefresh(t)
+	ad := mailfake.NewAdapter(map[string]map[string][]mailfake.Message{
+		"acct": {"INBOX": {
+			{UID: 1, Envelope: mail.MessageEnvelope{UID: 1, From: "a@example.com", Subject: "one"}, Body: "one"},
+			{UID: 2, Envelope: mail.MessageEnvelope{UID: 2, From: "a@example.com", Subject: "two"}, Body: "two"},
+			{UID: 3, Envelope: mail.MessageEnvelope{UID: 3, From: "a@example.com", Subject: "three"}, Body: "three"},
+		}},
+	})
+
+	if _, err := refresh.Refresh(context.Background(), cfg, repo, ad, refresh.RefreshOptions{MaxCandidates: 2}); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	msgs, err := repo.ListMessages(cache.QueryFilter{AccountID: "acct", Folder: "INBOX", Limit: 10})
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	if len(msgs) != 2 {
+		t.Fatalf("cached rows after capped refresh = %d, want 2", len(msgs))
+	}
+	state, err := repo.FolderState("acct", "INBOX")
+	if err != nil {
+		t.Fatalf("FolderState: %v", err)
+	}
+	if state == nil || state.HighestModSeq != 0 {
+		t.Fatalf("state.HighestModSeq = %+v, want incomplete fast-path marker", state)
+	}
+}
+
+func TestPolicyFingerprintChangeBypassesRemoteMetadataFastPath(t *testing.T) {
+	cfg := &config.Config{Mail: config.Mail{Accounts: []config.Account{{
+		ID:       "acct",
+		Email:    "acct@example.com",
+		Host:     "imap.example.com",
+		Port:     993,
+		TLS:      boolPtr(true),
+		Username: "acct@example.com",
+		PasswordRef: config.PasswordRef{
+			Source:   config.PasswordSourceFile,
+			Provider: config.PasswordProviderLocal,
+			ID:       "/ksuite-mail/acct/password",
+		},
+		Policy:  config.PolicyDomain,
+		Domains: []string{"other.com"},
+		Folders: []string{"INBOX"},
+	}}}}
+	now := time.Now().UTC()
+	repo := mustOpenRepoForRefresh(t)
+	if err := repo.UpsertFolderState(cache.FolderState{
+		AccountID:             "acct",
+		Folder:                "INBOX",
+		UIDVALIDITY:           123,
+		UIDNEXT:               2,
+		HighestModSeq:         99,
+		LastSeenUID:           1,
+		PolicyFingerprint:     "domain:example.com",
+		LastRefreshAttempted:  ptrTime(now),
+		LastSuccessfulRefresh: ptrTime(now),
+	}); err != nil {
+		t.Fatalf("seed folder state: %v", err)
+	}
+	ad := mailfake.NewAdapter(map[string]map[string][]mailfake.Message{
+		"acct": {"INBOX": {
+			{
+				UID: 1,
+				Envelope: mail.MessageEnvelope{
+					UID:     1,
+					From:    "newly-allowed@other.com",
+					Subject: "newly allowed",
+				},
+				Body:            "newly allowed",
+				VisibleByPolicy: true,
+			},
+		}},
+	})
+	ad.SetHighestModSeq("acct", "INBOX", 99)
+
+	if _, err := refresh.Refresh(context.Background(), cfg, repo, ad, refresh.RefreshOptions{MaxCandidates: 10}); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	msgs, err := repo.ListMessages(cache.QueryFilter{AccountID: "acct", Folder: "INBOX", Limit: 10})
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	if len(msgs) != 1 || msgs[0].From != "newly-allowed@other.com" {
+		t.Fatalf("messages after policy expansion = %#v", msgs)
+	}
+	state, err := repo.FolderState("acct", "INBOX")
+	if err != nil {
+		t.Fatalf("FolderState: %v", err)
+	}
+	if state == nil || state.PolicyFingerprint != "domain:other.com" {
+		t.Fatalf("policy fingerprint = %+v, want updated domain", state)
+	}
+}
+
 func mustOpenRepoForRefresh(t *testing.T) *cache.Repository {
 	t.Helper()
 	repo, err := cache.NewRepository(cache.DBOptions{Path: mustTempDB(t)})

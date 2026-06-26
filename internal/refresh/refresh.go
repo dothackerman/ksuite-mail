@@ -77,11 +77,13 @@ func Refresh(ctx context.Context, cfg *config.Config, repo *cache.Repository, sr
 	}
 
 	anySuccess := false
+	allSuccess := true
 	var lastSuccess time.Time
 	for i := range cfg.Mail.Accounts {
 		account := &cfg.Mail.Accounts[i]
 		for _, folder := range account.Folders {
 			if err := refreshFolder(ctx, repo, src, account, folder, previewBytes, now, opts.MaxCandidates); err != nil {
+				allSuccess = false
 				res.Partial = true
 				res.Warnings = append(res.Warnings, Warning{
 					Code:    remoteErrorCode(err),
@@ -94,7 +96,7 @@ func Refresh(ctx context.Context, cfg *config.Config, repo *cache.Repository, sr
 		}
 	}
 	if anySuccess {
-		res.Meta.RemoteOK = true
+		res.Meta.RemoteOK = allSuccess
 		res.Meta.LastSuccessfulRefreshAt = &lastSuccess
 	} else {
 		res.Meta.RemoteOK = false
@@ -121,6 +123,7 @@ func refreshFolder(
 	if err != nil {
 		return err
 	}
+	fingerprint := policyFingerprint(account)
 
 	// UIDVALIDITY changed => clear the local folder and restart from scratch.
 	if state != nil && state.UIDVALIDITY != remote.UIDVALIDITY {
@@ -130,7 +133,8 @@ func refreshFolder(
 		state = nil
 	}
 
-	if state != nil && state.UIDVALIDITY == remote.UIDVALIDITY && state.UIDNEXT == remote.UIDNEXT &&
+	if state != nil && state.PolicyFingerprint == fingerprint &&
+		state.UIDVALIDITY == remote.UIDVALIDITY && state.UIDNEXT == remote.UIDNEXT &&
 		state.HighestModSeq != 0 && state.HighestModSeq == remote.HighestModSeq {
 		return ctxRepo.UpsertFolderState(cache.FolderState{
 			AccountID:             account.ID,
@@ -139,12 +143,13 @@ func refreshFolder(
 			UIDNEXT:               remote.UIDNEXT,
 			HighestModSeq:         remote.HighestModSeq,
 			LastSeenUID:           state.LastSeenUID,
+			PolicyFingerprint:     fingerprint,
 			LastRefreshAttempted:  &now,
 			LastSuccessfulRefresh: &now,
 		})
 	}
 
-	candidates, complete, err := discoverCandidates(ctx, src, account, folder, state, remote.UIDNEXT, maxCandidates)
+	candidates, complete, err := discoverCandidates(ctx, src, account, folder, remote.UIDNEXT, maxCandidates)
 	if err != nil {
 		return err
 	}
@@ -208,13 +213,18 @@ func refreshFolder(
 			lastSeenUID = uint64(uid)
 		}
 	}
+	highestModSeq := remote.HighestModSeq
+	if !complete {
+		highestModSeq = 0
+	}
 	if err := ctxRepo.UpsertFolderState(cache.FolderState{
 		AccountID:             account.ID,
 		Folder:                folder,
 		UIDVALIDITY:           remote.UIDVALIDITY,
 		UIDNEXT:               remote.UIDNEXT,
-		HighestModSeq:         remote.HighestModSeq,
+		HighestModSeq:         highestModSeq,
 		LastSeenUID:           lastSeenUID,
+		PolicyFingerprint:     fingerprint,
 		LastRefreshAttempted:  &now,
 		LastSuccessfulRefresh: &now,
 	}); err != nil {
@@ -228,14 +238,10 @@ func discoverCandidates(
 	src source,
 	account *config.Account,
 	folder string,
-	state *cache.FolderState,
 	uidNext uint64,
 	maxCandidates int,
 ) ([]mail.UID, bool, error) {
 	scope := mail.UIDRange{}
-	if state != nil && state.LastSeenUID > 0 {
-		scope.Min = state.LastSeenUID + 1
-	}
 	if uidNext > 0 {
 		scope.Max = uidNext
 	}
@@ -245,7 +251,10 @@ func discoverCandidates(
 		if err != nil {
 			return nil, false, err
 		}
-		return uids, state == nil, nil
+		if maxCandidates > 0 && len(uids) > maxCandidates {
+			return uids[len(uids)-maxCandidates:], false, nil
+		}
+		return uids, true, nil
 	}
 
 	var out []mail.UID
@@ -267,7 +276,23 @@ func discoverCandidates(
 	if maxCandidates > 0 && len(out) > maxCandidates {
 		return out[len(out)-maxCandidates:], false, nil
 	}
-	return out, state == nil, nil
+	return out, true, nil
+}
+
+func policyFingerprint(account *config.Account) string {
+	if account == nil {
+		return ""
+	}
+	domains := make([]string, 0, len(account.Domains))
+	for _, domain := range account.Domains {
+		domain = strings.ToLower(strings.TrimSpace(domain))
+		if domain == "" {
+			continue
+		}
+		domains = append(domains, domain)
+	}
+	sort.Strings(domains)
+	return account.Policy + ":" + strings.Join(domains, ",")
 }
 
 func dedupeUIDs(uids []mail.UID) []mail.UID {

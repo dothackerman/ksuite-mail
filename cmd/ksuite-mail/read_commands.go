@@ -128,7 +128,7 @@ func runShow(args []string) int {
 	return runReadCommand(*socket, func(ctx context.Context, c *udsclient.Client) (api.Envelope, error) {
 		return c.Show(ctx, api.ShowRequest{
 			ID:       *id,
-			Preview:  *preview,
+			Preview:  *preview || maxChars > 0,
 			MaxChars: maxChars,
 		})
 	})

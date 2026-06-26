@@ -41,6 +41,7 @@ type FolderState struct {
 	UIDNEXT               uint64
 	HighestModSeq         int64
 	LastSeenUID           uint64
+	PolicyFingerprint     string
 	LastRefreshAttempted  *time.Time
 	LastSuccessfulRefresh *time.Time
 }
@@ -150,6 +151,7 @@ func (r *Repository) migrate() error {
 			uidnext INTEGER NOT NULL,
 			highestmodseq INTEGER NOT NULL DEFAULT 0,
 			last_seen_uid INTEGER NOT NULL DEFAULT 0,
+			policy_fingerprint TEXT NOT NULL DEFAULT '',
 			last_refresh_attempted_at TEXT,
 			last_successful_refresh_at TEXT,
 			PRIMARY KEY (account_id, folder)
@@ -172,7 +174,36 @@ func (r *Repository) migrate() error {
 			return fmt.Errorf("cache migration: %w", err)
 		}
 	}
+	if err := r.ensureFolderStatePolicyFingerprintColumn(); err != nil {
+		return fmt.Errorf("cache migration: %w", err)
+	}
 	return nil
+}
+
+func (r *Repository) ensureFolderStatePolicyFingerprintColumn() error {
+	rows, err := r.db.Query(`PRAGMA table_info(folder_state)`)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull int
+		var defaultValue any
+		var pk int
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
+			return err
+		}
+		if name == "policy_fingerprint" {
+			return nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	_, err = r.db.Exec(`ALTER TABLE folder_state ADD COLUMN policy_fingerprint TEXT NOT NULL DEFAULT ''`)
+	return err
 }
 
 func rowToMessage(scan fnScanner) (mail.CachedMessage, error) {
@@ -528,14 +559,15 @@ func (r *Repository) UpsertFolderState(fs FolderState) error {
 	}
 	const upsert = `
 		INSERT INTO folder_state(
-			account_id, folder, uidvalidity, uidnext, highestmodseq, last_seen_uid,
+			account_id, folder, uidvalidity, uidnext, highestmodseq, last_seen_uid, policy_fingerprint,
 			last_refresh_attempted_at, last_successful_refresh_at
-		) VALUES(?,?,?,?,?,?,?,?)
+		) VALUES(?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(account_id, folder) DO UPDATE SET
 			uidvalidity = excluded.uidvalidity,
 			uidnext = excluded.uidnext,
 			highestmodseq = excluded.highestmodseq,
 			last_seen_uid = excluded.last_seen_uid,
+			policy_fingerprint = excluded.policy_fingerprint,
 			last_refresh_attempted_at = excluded.last_refresh_attempted_at,
 			last_successful_refresh_at = excluded.last_successful_refresh_at;`
 	var attempted, successful any
@@ -548,7 +580,7 @@ func (r *Repository) UpsertFolderState(fs FolderState) error {
 		successful = fs.LastSuccessfulRefresh.UTC().Format(time.RFC3339Nano)
 	}
 	_, err := r.db.Exec(upsert,
-		fs.AccountID, fs.Folder, fs.UIDVALIDITY, fs.UIDNEXT, fs.HighestModSeq, fs.LastSeenUID,
+		fs.AccountID, fs.Folder, fs.UIDVALIDITY, fs.UIDNEXT, fs.HighestModSeq, fs.LastSeenUID, fs.PolicyFingerprint,
 		attempted, successful,
 	)
 	return err
@@ -557,7 +589,7 @@ func (r *Repository) UpsertFolderState(fs FolderState) error {
 // FolderState returns cached sync metadata for one account/folder.
 func (r *Repository) FolderState(accountID, folder string) (*FolderState, error) {
 	row := r.db.QueryRow(`SELECT
-		account_id, folder, uidvalidity, uidnext, highestmodseq, last_seen_uid,
+		account_id, folder, uidvalidity, uidnext, highestmodseq, last_seen_uid, policy_fingerprint,
 		last_refresh_attempted_at, last_successful_refresh_at
 	FROM folder_state WHERE account_id=? AND folder=?`, accountID, folder)
 	var (
@@ -565,7 +597,7 @@ func (r *Repository) FolderState(accountID, folder string) (*FolderState, error)
 		attemptedText, successText sql.NullString
 	)
 	if err := row.Scan(
-		&fs.AccountID, &fs.Folder, &fs.UIDVALIDITY, &fs.UIDNEXT, &fs.HighestModSeq, &fs.LastSeenUID,
+		&fs.AccountID, &fs.Folder, &fs.UIDVALIDITY, &fs.UIDNEXT, &fs.HighestModSeq, &fs.LastSeenUID, &fs.PolicyFingerprint,
 		&attemptedText, &successText,
 	); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -608,18 +640,20 @@ func (r *Repository) CleanupExpired(ttl time.Duration) error {
 		return nil
 	}
 	threshold := r.now().Add(-ttl).UTC().Format(time.RFC3339Nano)
-	rows, err := r.db.Query(`SELECT public_id FROM messages WHERE last_loaded_or_verified_at < ?`, threshold)
+	rows, err := r.db.Query(`SELECT public_id, account_id, folder FROM messages WHERE last_loaded_or_verified_at < ?`, threshold)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = rows.Close() }()
 	var ids []string
+	affectedFolders := map[string]struct{}{}
 	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
+		var id, accountID, folder string
+		if err := rows.Scan(&id, &accountID, &folder); err != nil {
 			return err
 		}
 		ids = append(ids, id)
+		affectedFolders[accountID+"\x00"+folder] = struct{}{}
 	}
 	if err := rows.Err(); err != nil {
 		return err
@@ -638,6 +672,15 @@ func (r *Repository) CleanupExpired(ttl time.Duration) error {
 			return rollback(tx, err)
 		}
 		if _, err := tx.Exec(`DELETE FROM messages_fts WHERE public_id=?`, id); err != nil {
+			return rollback(tx, err)
+		}
+	}
+	for key := range affectedFolders {
+		parts := strings.SplitN(key, "\x00", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		if _, err := tx.Exec(`DELETE FROM folder_state WHERE account_id=? AND folder=?`, parts[0], parts[1]); err != nil {
 			return rollback(tx, err)
 		}
 	}

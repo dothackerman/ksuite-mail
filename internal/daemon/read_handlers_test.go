@@ -15,8 +15,10 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/dothackerman/ksuite-mail/internal/api"
+	"github.com/dothackerman/ksuite-mail/internal/cache"
 	"github.com/dothackerman/ksuite-mail/internal/config"
 	"github.com/dothackerman/ksuite-mail/internal/mail"
 	"github.com/dothackerman/ksuite-mail/internal/mailfake"
@@ -463,5 +465,89 @@ func TestReadNoSourceReturnsErrorEnvelopeInsteadOfSuccessfulNoop(t *testing.T) {
 	}
 	if got.Refresh.RemoteOK {
 		t.Fatalf("refresh.remote_ok = true, want false")
+	}
+}
+
+func TestReadListAppliesPolicyBeforePagination(t *testing.T) {
+	adapter := mailfake.NewAdapter(map[string]map[string][]mailfake.Message{"acct": {"INBOX": {}, "Sent": {}}})
+	adapter.SetFailure("select", "acct", "INBOX", "", fmt.Errorf("remote down"))
+	opts := deploymentWithSource(t, strings.Replace(validDomainConfig, `domains = ["example.com"]`, `domains = ["other.com"]`, 1), adapter)
+	now := time.Now().UTC()
+	seedDaemonCache(t, opts.StateDir,
+		cachedForDaemon("msg_new_disallowed", "thread-1", "alice@example.com", now, 1),
+		cachedForDaemon("msg_old_allowed", "thread-2", "carol@other.com", now.Add(-time.Hour), 2),
+	)
+	ts := newLocalHTTPServer(t, opts)
+	defer ts.Close()
+
+	res := postJSON(t, ts.Client(), ts.URL+"/v1/list", map[string]any{"account": "acct", "folder": "INBOX", "limit": 1})
+	defer func() { _ = res.Body.Close() }()
+	env := decodeEnvelopeBody(t, res.Body)
+	var got api.ListResponse
+	if err := env.DecodeResult(&got); err != nil {
+		t.Fatalf("decode list response: %v", err)
+	}
+	if len(got.Results) != 1 || got.Results[0].ID != "msg_old_allowed" {
+		t.Fatalf("results = %#v, want older policy-allowed row", got.Results)
+	}
+}
+
+func TestReadThreadAppliesLimitAfterPolicy(t *testing.T) {
+	adapter := mailfake.NewAdapter(map[string]map[string][]mailfake.Message{"acct": {"INBOX": {}, "Sent": {}}})
+	adapter.SetFailure("select", "acct", "INBOX", "", fmt.Errorf("remote down"))
+	opts := deploymentWithSource(t, strings.Replace(validDomainConfig, `domains = ["example.com"]`, `domains = ["other.com"]`, 1), adapter)
+	now := time.Now().UTC()
+	seedDaemonCache(t, opts.StateDir,
+		cachedForDaemon("msg_new_disallowed", "thread-1", "alice@example.com", now, 1),
+		cachedForDaemon("msg_old_allowed", "thread-1", "carol@other.com", now.Add(-time.Hour), 2),
+	)
+	ts := newLocalHTTPServer(t, opts)
+	defer ts.Close()
+
+	res := postJSON(t, ts.Client(), ts.URL+"/v1/thread", map[string]any{"id": "msg_old_allowed", "max_messages": 1})
+	defer func() { _ = res.Body.Close() }()
+	env := decodeEnvelopeBody(t, res.Body)
+	var got api.ThreadResponse
+	if err := env.DecodeResult(&got); err != nil {
+		t.Fatalf("decode thread response: %v", err)
+	}
+	if len(got.Messages) != 1 || got.Messages[0].ID != "msg_old_allowed" {
+		t.Fatalf("thread messages = %#v, want policy-allowed row", got.Messages)
+	}
+}
+
+func seedDaemonCache(t *testing.T, stateDir string, messages ...mail.CachedMessage) {
+	t.Helper()
+	repo, err := cache.NewRepository(cache.DBOptions{Path: filepath.Join(stateDir, "mail.db")})
+	if err != nil {
+		t.Fatalf("NewRepository: %v", err)
+	}
+	defer func() { _ = repo.Close() }()
+	for _, msg := range messages {
+		if err := repo.UpsertMessage(msg); err != nil {
+			t.Fatalf("UpsertMessage(%s): %v", msg.ID, err)
+		}
+	}
+}
+
+func cachedForDaemon(id, threadKey, from string, date time.Time, uid mail.UID) mail.CachedMessage {
+	return mail.CachedMessage{
+		ID:                  id,
+		AccountID:           "acct",
+		Folder:              "INBOX",
+		UIDVALIDITY:         123,
+		UID:                 uid,
+		MessageID:           "<" + id + "@case>",
+		ThreadKey:           threadKey,
+		Subject:             id,
+		From:                from,
+		To:                  "agent@example.net",
+		Date:                date,
+		Snippet:             id,
+		BodyText:            id,
+		VisibleReason:       "seed",
+		ContentHash:         id,
+		FirstLoadedAt:       date,
+		LastLoadedOrChecked: date,
 	}
 }

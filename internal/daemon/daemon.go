@@ -160,20 +160,15 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 	filter := cache.QueryFilter{
 		AccountID: accountFilter(req.Account),
 		Folder:    req.Folder,
-		Limit:     withDefault(cfg.Mail.DefaultLimit, req.Limit, defaultLimit),
-		Offset:    max(0, req.Offset),
 	}
-	messages, err := repo.ListMessages(filter)
+	results, err := visibleMessagePage(cfg, func(batchLimit, batchOffset int) ([]mail.CachedMessage, error) {
+		filter.Limit = batchLimit
+		filter.Offset = batchOffset
+		return repo.ListMessages(filter)
+	}, withDefault(cfg.Mail.DefaultLimit, req.Limit, defaultLimit), max(0, req.Offset))
 	if err != nil {
 		s.writeError(w, http.StatusInternalServerError, "internal_error", "could not query cache")
 		return
-	}
-	results := make([]api.MessageSummary, 0, len(messages))
-	for _, msg := range messages {
-		if !cachedMessageAllowed(cfg, msg) {
-			continue
-		}
-		results = append(results, toMessageSummary(msg))
 	}
 
 	resp := api.ListResponse{
@@ -210,20 +205,15 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		AccountID: accountFilter(req.Account),
 		Folder:    req.Folder,
 		Query:     req.Query,
-		Limit:     withDefault(cfg.Mail.DefaultLimit, req.Limit, defaultLimit),
-		Offset:    max(0, req.Offset),
 	}
-	messages, err := repo.SearchMessages(filter)
+	results, err := visibleMessagePage(cfg, func(batchLimit, batchOffset int) ([]mail.CachedMessage, error) {
+		filter.Limit = batchLimit
+		filter.Offset = batchOffset
+		return repo.SearchMessages(filter)
+	}, withDefault(cfg.Mail.DefaultLimit, req.Limit, defaultLimit), max(0, req.Offset))
 	if err != nil {
 		s.writeError(w, http.StatusInternalServerError, "internal_error", "could not search cache")
 		return
-	}
-	results := make([]api.MessageSummary, 0, len(messages))
-	for _, msg := range messages {
-		if !cachedMessageAllowed(cfg, msg) {
-			continue
-		}
-		results = append(results, toMessageSummary(msg))
 	}
 
 	resp := api.SearchResponse{
@@ -340,14 +330,14 @@ func (s *Server) handleThread(w http.ResponseWriter, r *http.Request) {
 		maxMessages = defaultLimit
 	}
 	results := make([]api.MessageSummary, 0, min(len(messages), maxMessages))
-	for i, msg := range messages {
-		if i >= maxMessages {
-			break
-		}
+	for _, msg := range messages {
 		if !cachedMessageAllowed(cfg, msg) {
 			continue
 		}
 		results = append(results, toMessageSummary(msg))
+		if len(results) >= maxMessages {
+			break
+		}
 	}
 
 	resp := api.ThreadResponse{
@@ -461,6 +451,47 @@ func (s *Server) writeReadOK(w http.ResponseWriter, status string, payload any, 
 		return
 	}
 	s.writeJSON(w, http.StatusOK, env)
+}
+
+func visibleMessagePage(
+	cfg *config.Config,
+	load func(limit, offset int) ([]mail.CachedMessage, error),
+	limit int,
+	offset int,
+) ([]api.MessageSummary, error) {
+	if limit <= 0 {
+		limit = defaultLimit
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	batchSize := max(defaultLimit, limit+offset)
+	results := make([]api.MessageSummary, 0, limit)
+	visibleSkipped := 0
+	rawOffset := 0
+	for {
+		messages, err := load(batchSize, rawOffset)
+		if err != nil {
+			return nil, err
+		}
+		for _, msg := range messages {
+			if !cachedMessageAllowed(cfg, msg) {
+				continue
+			}
+			if visibleSkipped < offset {
+				visibleSkipped++
+				continue
+			}
+			results = append(results, toMessageSummary(msg))
+			if len(results) >= limit {
+				return results, nil
+			}
+		}
+		if len(messages) < batchSize {
+			return results, nil
+		}
+		rawOffset += len(messages)
+	}
 }
 
 func (s *Server) refreshAndLoad(ctx context.Context) (*config.Config, *cache.Repository, refresh.Result, error) {

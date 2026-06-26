@@ -84,6 +84,18 @@ func TestReadCommandsAcceptDocumentedFlagsAndPositionals(t *testing.T) {
 			},
 		},
 		{
+			name: "show max chars implies bounded preview",
+			run:  runShow,
+			args: []string{"msg_abc123", "--max-chars", "4000", "--json"},
+			path: "/v1/show",
+			assertReq: func(t *testing.T, body map[string]any) {
+				t.Helper()
+				if body["id"] != "msg_abc123" || body["preview"] != true || body["max_chars"] != float64(4000) {
+					t.Fatalf("show body = %#v", body)
+				}
+			},
+		},
+		{
 			name: "show defaults preview off",
 			run:  runShow,
 			args: []string{"msg_headers", "--json"},
