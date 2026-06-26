@@ -65,6 +65,47 @@ func TestRepositoryCanCreateAndQueryFTS5(t *testing.T) {
 	}
 }
 
+func TestSearchMessagesTreatsPunctuationAsPlainText(t *testing.T) {
+	t.Parallel()
+
+	repo := mustOpenRepo(t, filepath.Join(t.TempDir(), "mail.db"))
+	defer func() { _ = repo.Close() }()
+
+	now := time.Now().UTC().Truncate(time.Second)
+	if err := repo.UpsertMessage(mail.CachedMessage{
+		ID:                  "msg_punctuation",
+		AccountID:           "acct",
+		Folder:              "INBOX",
+		UIDVALIDITY:         10,
+		UID:                 11,
+		MessageID:           "<punctuation@case>",
+		ThreadKey:           "thread-p",
+		Subject:             "invoice #123",
+		From:                "alice@example.com",
+		To:                  "bob@regenerativ.ch",
+		Date:                now,
+		Flags:               "\\Seen",
+		Snippet:             "foo-bar account",
+		BodyText:            "credits for regenerativ.ch",
+		VisibleReason:       "full",
+		ContentHash:         "h",
+		FirstLoadedAt:       now,
+		LastLoadedOrChecked: now,
+	}); err != nil {
+		t.Fatalf("UpsertMessage: %v", err)
+	}
+
+	for _, query := range []string{"alice@example.com", "regenerativ.ch", "foo-bar", "invoice #123"} {
+		results, err := repo.SearchMessages(QueryFilter{Query: query})
+		if err != nil {
+			t.Fatalf("SearchMessages(%q): %v", query, err)
+		}
+		if len(results) != 1 {
+			t.Fatalf("SearchMessages(%q) = %d results, want 1", query, len(results))
+		}
+	}
+}
+
 func TestCleanupUsesLastLoadedOrCheckedForTTL(t *testing.T) {
 	t.Parallel()
 

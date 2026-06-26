@@ -137,6 +137,9 @@ func TestReadListEndpointReturnsMessageSummaries(t *testing.T) {
 	if len(got.Results) != 1 {
 		t.Fatalf("results = %d, want 1", len(got.Results))
 	}
+	if got.Results[0].Account != "acct" || got.Results[0].Folder != "INBOX" {
+		t.Fatalf("summary source fields = account %q folder %q", got.Results[0].Account, got.Results[0].Folder)
+	}
 }
 
 func TestReadShowOmitsReplyChainForDomainAccount(t *testing.T) {
@@ -344,4 +347,121 @@ func TestReadSearchRequiresQuery(t *testing.T) {
 		t.Fatalf("status = %d, want 400", res.StatusCode)
 	}
 	_ = res.Body.Close()
+}
+
+func TestReadShowRechecksCachedMessageAgainstCurrentDomainPolicy(t *testing.T) {
+	adapter := mailfake.NewAdapter(map[string]map[string][]mailfake.Message{
+		"acct": {
+			"INBOX": {
+				{
+					UID: 6,
+					Envelope: mail.MessageEnvelope{
+						UID:       6,
+						Subject:   "policy",
+						From:      "alice@example.com",
+						To:        "bob@example.com",
+						Snippet:   "policy",
+						ThreadKey: "thread",
+					},
+					Body:            "body",
+					VisibleByPolicy: true,
+				},
+			},
+			"Sent": {},
+		},
+	})
+	opts := deploymentWithSource(t, validDomainConfig, adapter)
+	ts := newLocalHTTPServer(t, opts)
+	defer ts.Close()
+
+	listRes := postJSON(t, ts.Client(), ts.URL+"/v1/list", map[string]any{"account": "acct", "folder": "INBOX"})
+	var listEnv api.Envelope
+	if err := json.NewDecoder(listRes.Body).Decode(&listEnv); err != nil {
+		t.Fatalf("decode list: %v", err)
+	}
+	_ = listRes.Body.Close()
+	var list api.ListResponse
+	if err := listEnv.DecodeResult(&list); err != nil || len(list.Results) != 1 {
+		t.Fatalf("decode list payload: %v len=%d", err, len(list.Results))
+	}
+
+	cfgPath := opts.ConfigPath
+	narrowed := strings.Replace(validDomainConfig, `domains = ["example.com"]`, `domains = ["other.example"]`, 1)
+	if err := os.WriteFile(cfgPath, []byte(narrowed), 0o640); err != nil {
+		t.Fatalf("narrow config: %v", err)
+	}
+	adapter.SetFailure("select", "acct", "INBOX", "", fmt.Errorf("remote down"))
+
+	showRes := postJSON(t, ts.Client(), ts.URL+"/v1/show", map[string]any{"id": list.Results[0].ID, "preview": true})
+	defer func() { _ = showRes.Body.Close() }()
+	if showRes.StatusCode != http.StatusNotFound {
+		t.Fatalf("show status = %d, want 404", showRes.StatusCode)
+	}
+}
+
+func TestReadContextCapsSeedBodyByBudget(t *testing.T) {
+	adapter := mailfake.NewAdapter(map[string]map[string][]mailfake.Message{
+		"acct": {
+			"INBOX": {
+				{
+					UID: 7,
+					Envelope: mail.MessageEnvelope{
+						UID:       7,
+						Subject:   "budget",
+						From:      "alice@example.com",
+						ThreadKey: "thread",
+						Snippet:   "seed",
+					},
+					Body:            strings.Repeat("x", 200),
+					VisibleByPolicy: true,
+				},
+			},
+			"Sent": {},
+		},
+	})
+	ts := newLocalHTTPServer(t, deploymentWithSource(t, validDomainConfig, adapter))
+	defer ts.Close()
+	listRes := postJSON(t, ts.Client(), ts.URL+"/v1/list", map[string]any{"account": "acct", "folder": "INBOX"})
+	var listEnv api.Envelope
+	if err := json.NewDecoder(listRes.Body).Decode(&listEnv); err != nil {
+		t.Fatalf("decode list: %v", err)
+	}
+	_ = listRes.Body.Close()
+	var list api.ListResponse
+	if err := listEnv.DecodeResult(&list); err != nil || len(list.Results) != 1 {
+		t.Fatalf("decode list payload: %v len=%d", err, len(list.Results))
+	}
+
+	ctxRes := postJSON(t, ts.Client(), ts.URL+"/v1/context", map[string]any{"id": list.Results[0].ID, "budget": 25})
+	defer func() { _ = ctxRes.Body.Close() }()
+	env := decodeEnvelopeBody(t, ctxRes.Body)
+	var got api.ContextResponse
+	if err := env.DecodeResult(&got); err != nil {
+		t.Fatalf("decode context: %v", err)
+	}
+	if len(got.Seed.BodyText) > 25 {
+		t.Fatalf("seed body length = %d, want <= 25", len(got.Seed.BodyText))
+	}
+}
+
+func TestReadNoSourceReturnsErrorEnvelopeInsteadOfSuccessfulNoop(t *testing.T) {
+	ts := newLocalHTTPServer(t, deploymentWithSource(t, validDomainConfig, nil))
+	defer ts.Close()
+
+	res := postJSON(t, ts.Client(), ts.URL+"/v1/list", map[string]any{"account": "acct", "folder": "INBOX"})
+	defer func() { _ = res.Body.Close() }()
+	env := decodeEnvelopeBody(t, res.Body)
+	if env.Status != api.StatusError {
+		t.Fatalf("status = %q, want %q", env.Status, api.StatusError)
+	}
+	if len(env.Warnings) != 1 || env.Warnings[0].Code != "remote_source_unavailable" {
+		t.Fatalf("warnings = %#v", env.Warnings)
+	}
+	var got api.ListResponse
+	if err := env.DecodeResult(&got); err != nil {
+		t.Fatalf("decode list response: %v", err)
+	}
+	if got.Refresh.RemoteOK {
+		t.Fatalf("refresh.remote_ok = true, want false")
+	}
 }

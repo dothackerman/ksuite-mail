@@ -245,6 +245,108 @@ func TestRefreshHandlesMessageMoveAcrossFolders(t *testing.T) {
 	}
 }
 
+func TestDomainRefreshDoesNotDeleteCachedRowsWhenCandidateSearchIsCapped(t *testing.T) {
+	cfg := &config.Config{Mail: config.Mail{Accounts: []config.Account{{
+		ID:       "acct",
+		Email:    "acct@example.com",
+		Host:     "imap.example.com",
+		Port:     993,
+		TLS:      boolPtr(true),
+		Username: "acct@example.com",
+		PasswordRef: config.PasswordRef{
+			Source:   config.PasswordSourceFile,
+			Provider: config.PasswordProviderLocal,
+			ID:       "/ksuite-mail/acct/password",
+		},
+		Policy:  config.PolicyDomain,
+		Domains: []string{"example.com"},
+		Folders: []string{"INBOX"},
+	}}}}
+	now := time.Now().UTC()
+	repo := mustOpenRepoForRefresh(t)
+	if err := repo.UpsertMessage(mail.CachedMessage{
+		ID:                  mail.PublicID("acct", "INBOX", 123, 1),
+		AccountID:           "acct",
+		Folder:              "INBOX",
+		UIDVALIDITY:         123,
+		UID:                 1,
+		MessageID:           "<cached>",
+		ThreadKey:           "thread-1",
+		Subject:             "cached",
+		From:                "alice@example.com",
+		To:                  "bob@example.com",
+		Date:                now,
+		Snippet:             "cached",
+		BodyText:            "cached",
+		VisibleReason:       "domain:from",
+		ContentHash:         "h1",
+		FirstLoadedAt:       now,
+		LastLoadedOrChecked: now,
+	}); err != nil {
+		t.Fatalf("seed cached message: %v", err)
+	}
+	ad := mailfake.NewAdapter(map[string]map[string][]mailfake.Message{
+		"acct": {"INBOX": {
+			{UID: 1, Envelope: mail.MessageEnvelope{UID: 1, From: "alice@example.com", Subject: "old"}, Body: "old", VisibleByPolicy: true},
+			{UID: 2, Envelope: mail.MessageEnvelope{UID: 2, From: "alice@example.com", Subject: "new"}, Body: "new", VisibleByPolicy: true},
+		}},
+	})
+
+	if _, err := refresh.Refresh(context.Background(), cfg, repo, ad, refresh.RefreshOptions{MaxCandidates: 1}); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	msgs, err := repo.ListMessages(cache.QueryFilter{AccountID: "acct", Folder: "INBOX", Limit: 10})
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	if len(msgs) != 2 {
+		t.Fatalf("cached rows after capped refresh = %d, want 2", len(msgs))
+	}
+}
+
+func TestRefreshPreservesLatestSuccessfulTimestampWhenAllFoldersFail(t *testing.T) {
+	cfg := &config.Config{Mail: config.Mail{Accounts: []config.Account{{
+		ID:       "acct",
+		Email:    "acct@example.com",
+		Host:     "imap.example.com",
+		Port:     993,
+		TLS:      boolPtr(true),
+		Username: "acct@example.com",
+		PasswordRef: config.PasswordRef{
+			Source:   config.PasswordSourceFile,
+			Provider: config.PasswordProviderLocal,
+			ID:       "/ksuite-mail/acct/password",
+		},
+		Policy:  config.PolicyFull,
+		Folders: []string{"INBOX"},
+	}}}}
+	last := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	repo := mustOpenRepoForRefresh(t)
+	if err := repo.UpsertFolderState(cache.FolderState{
+		AccountID:             "acct",
+		Folder:                "INBOX",
+		UIDVALIDITY:           123,
+		UIDNEXT:               2,
+		LastRefreshAttempted:  ptrTime(last),
+		LastSuccessfulRefresh: ptrTime(last),
+	}); err != nil {
+		t.Fatalf("seed folder state: %v", err)
+	}
+	ad := mailfake.NewAdapter(map[string]map[string][]mailfake.Message{"acct": {"INBOX": {}}})
+	ad.SetFailure("select", "acct", "INBOX", "", context.DeadlineExceeded)
+
+	res, err := refresh.Refresh(context.Background(), cfg, repo, ad, refresh.RefreshOptions{})
+	if err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	if res.Meta.RemoteOK {
+		t.Fatalf("RemoteOK = true, want false")
+	}
+	if res.Meta.LastSuccessfulRefreshAt == nil || !res.Meta.LastSuccessfulRefreshAt.Equal(last) {
+		t.Fatalf("LastSuccessfulRefreshAt = %v, want %v", res.Meta.LastSuccessfulRefreshAt, last)
+	}
+}
+
 func mustOpenRepoForRefresh(t *testing.T) *cache.Repository {
 	t.Helper()
 	repo, err := cache.NewRepository(cache.DBOptions{Path: mustTempDB(t)})

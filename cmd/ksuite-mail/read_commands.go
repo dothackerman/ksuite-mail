@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/dothackerman/ksuite-mail/internal/api"
@@ -21,6 +22,8 @@ func runInbox(args []string) int {
 	account := fs.String("account", "", "account identifier (default: all)")
 	limit := fs.Int("limit", 0, "maximum number of messages")
 	offset := fs.Int("offset", 0, "message offset")
+	_ = fs.Bool("brief", false, "reserved for compact output (currently JSON only)")
+	_ = fs.Bool("json", false, "emit JSON output")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -44,6 +47,7 @@ func runList(args []string) int {
 	folder := fs.String("folder", "", "folder name (default: all configured folders)")
 	limit := fs.Int("limit", 0, "maximum number of messages")
 	offset := fs.Int("offset", 0, "message offset")
+	_ = fs.Bool("json", false, "emit JSON output")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -68,11 +72,19 @@ func runSearch(args []string) int {
 	query := fs.String("query", "", "full-text query string")
 	limit := fs.Int("limit", 0, "maximum number of matches")
 	offset := fs.Int("offset", 0, "result offset")
+	_ = fs.Bool("json", false, "emit JSON output")
+	positional, args := extractFirstPositional(args, "socket", "account", "folder", "query", "limit", "offset")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 	if *query == "" {
-		fmt.Println("error: --query is required")
+		*query = positional
+	}
+	if *query == "" && len(fs.Args()) > 0 {
+		*query = fs.Args()[0]
+	}
+	if *query == "" {
+		fmt.Println("error: query is required")
 		return 2
 	}
 
@@ -93,13 +105,23 @@ func runShow(args []string) int {
 
 	socket := fs.String("socket", layout.SocketPath, "path to the daemon Unix socket")
 	id := fs.String("id", "", "message id from list/search")
-	preview := fs.Bool("preview", true, "include body preview")
-	maxChars := fs.Int("max_chars", 0, "body preview size limit (preview-only)")
+	preview := fs.Bool("preview", false, "include body preview")
+	maxChars := 0
+	fs.IntVar(&maxChars, "max-chars", 0, "body preview size limit (preview-only)")
+	fs.IntVar(&maxChars, "max_chars", 0, "body preview size limit (preview-only)")
+	_ = fs.Bool("json", false, "emit JSON output")
+	positional, args := extractFirstPositional(args, "socket", "id", "max-chars", "max_chars")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 	if *id == "" {
-		fmt.Println("error: --id is required")
+		*id = positional
+	}
+	if *id == "" && len(fs.Args()) > 0 {
+		*id = fs.Args()[0]
+	}
+	if *id == "" {
+		fmt.Println("error: id is required")
 		return 2
 	}
 
@@ -107,7 +129,7 @@ func runShow(args []string) int {
 		return c.Show(ctx, api.ShowRequest{
 			ID:       *id,
 			Preview:  *preview,
-			MaxChars: *maxChars,
+			MaxChars: maxChars,
 		})
 	})
 }
@@ -120,11 +142,19 @@ func runThread(args []string) int {
 	id := fs.String("id", "", "message id from list/search")
 	_ = fs.Bool("brief", false, "reserved for compact thread output (currently ignored)")
 	maxMessages := fs.Int("max_messages", 0, "maximum messages to return")
+	_ = fs.Bool("json", false, "emit JSON output")
+	positional, args := extractFirstPositional(args, "socket", "id", "max_messages")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 	if *id == "" {
-		fmt.Println("error: --id is required")
+		*id = positional
+	}
+	if *id == "" && len(fs.Args()) > 0 {
+		*id = fs.Args()[0]
+	}
+	if *id == "" {
+		fmt.Println("error: id is required")
 		return 2
 	}
 
@@ -143,11 +173,19 @@ func runContext(args []string) int {
 	socket := fs.String("socket", layout.SocketPath, "path to the daemon Unix socket")
 	id := fs.String("id", "", "message id from list/search")
 	budget := fs.Int("budget", 0, "timeline byte budget")
+	_ = fs.Bool("json", false, "emit JSON output")
+	positional, args := extractFirstPositional(args, "socket", "id", "budget")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 	if *id == "" {
-		fmt.Println("error: --id is required")
+		*id = positional
+	}
+	if *id == "" && len(fs.Args()) > 0 {
+		*id = fs.Args()[0]
+	}
+	if *id == "" {
+		fmt.Println("error: id is required")
 		return 2
 	}
 
@@ -157,6 +195,43 @@ func runContext(args []string) int {
 			Budget: *budget,
 		})
 	})
+}
+
+func extractFirstPositional(args []string, valueFlagNames ...string) (string, []string) {
+	valueFlags := make(map[string]struct{}, len(valueFlagNames))
+	for _, name := range valueFlagNames {
+		valueFlags[name] = struct{}{}
+	}
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			if i+1 >= len(args) {
+				return "", args
+			}
+			out := append([]string{}, args[:i]...)
+			out = append(out, args[i+2:]...)
+			return args[i+1], out
+		}
+		if strings.HasPrefix(arg, "-") {
+			name, hasInlineValue := flagName(arg)
+			if _, ok := valueFlags[name]; ok && !hasInlineValue && i+1 < len(args) {
+				i++
+			}
+			continue
+		}
+		out := append([]string{}, args[:i]...)
+		out = append(out, args[i+1:]...)
+		return arg, out
+	}
+	return "", args
+}
+
+func flagName(arg string) (string, bool) {
+	name := strings.TrimLeft(arg, "-")
+	if before, _, ok := strings.Cut(name, "="); ok {
+		return before, true
+	}
+	return name, false
 }
 
 func runReadCommand(socket string, fn func(context.Context, *udsclient.Client) (api.Envelope, error)) int {

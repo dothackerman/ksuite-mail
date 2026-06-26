@@ -98,6 +98,7 @@ func Refresh(ctx context.Context, cfg *config.Config, repo *cache.Repository, sr
 		res.Meta.LastSuccessfulRefreshAt = &lastSuccess
 	} else {
 		res.Meta.RemoteOK = false
+		res.Meta.LastSuccessfulRefreshAt = repo.LatestRefreshAt()
 	}
 	return res, nil
 }
@@ -129,7 +130,21 @@ func refreshFolder(
 		state = nil
 	}
 
-	candidates, err := discoverCandidates(ctx, src, account, folder, remote.UIDNEXT, maxCandidates)
+	if state != nil && state.UIDVALIDITY == remote.UIDVALIDITY && state.UIDNEXT == remote.UIDNEXT &&
+		state.HighestModSeq != 0 && state.HighestModSeq == remote.HighestModSeq {
+		return ctxRepo.UpsertFolderState(cache.FolderState{
+			AccountID:             account.ID,
+			Folder:                folder,
+			UIDVALIDITY:           remote.UIDVALIDITY,
+			UIDNEXT:               remote.UIDNEXT,
+			HighestModSeq:         remote.HighestModSeq,
+			LastSeenUID:           state.LastSeenUID,
+			LastRefreshAttempted:  &now,
+			LastSuccessfulRefresh: &now,
+		})
+	}
+
+	candidates, complete, err := discoverCandidates(ctx, src, account, folder, state, remote.UIDNEXT, maxCandidates)
 	if err != nil {
 		return err
 	}
@@ -178,11 +193,16 @@ func refreshFolder(
 		}
 	}
 
-	if err := ctxRepo.DeleteMissingByUIDSet(account.ID, folder, keep); err != nil {
-		return err
+	if complete {
+		if err := ctxRepo.DeleteMissingByUIDSet(account.ID, folder, keep); err != nil {
+			return err
+		}
 	}
 
 	lastSeenUID := uint64(0)
+	if state != nil {
+		lastSeenUID = state.LastSeenUID
+	}
 	for uid := range keep {
 		if uint64(uid) > lastSeenUID {
 			lastSeenUID = uint64(uid)
@@ -208,10 +228,14 @@ func discoverCandidates(
 	src source,
 	account *config.Account,
 	folder string,
+	state *cache.FolderState,
 	uidNext uint64,
 	maxCandidates int,
-) ([]mail.UID, error) {
+) ([]mail.UID, bool, error) {
 	scope := mail.UIDRange{}
+	if state != nil && state.LastSeenUID > 0 {
+		scope.Min = state.LastSeenUID + 1
+	}
 	if uidNext > 0 {
 		scope.Max = uidNext
 	}
@@ -219,9 +243,9 @@ func discoverCandidates(
 	if account.Policy != config.PolicyDomain {
 		uids, err := src.ListUIDs(ctx, *account, folder, scope)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
-		return uids, nil
+		return uids, state == nil, nil
 	}
 
 	var out []mail.UID
@@ -234,16 +258,16 @@ func discoverCandidates(
 			domain = strings.ToLower(domain)
 			uids, err := src.SearchAllowed(ctx, *account, folder, header, domain, scope)
 			if err != nil {
-				return nil, err
+				return nil, false, err
 			}
 			out = append(out, uids...)
 		}
 	}
 	out = dedupeUIDs(out)
 	if maxCandidates > 0 && len(out) > maxCandidates {
-		return out[:maxCandidates], nil
+		return out[len(out)-maxCandidates:], false, nil
 	}
-	return out, nil
+	return out, state == nil, nil
 }
 
 func dedupeUIDs(uids []mail.UID) []mail.UID {

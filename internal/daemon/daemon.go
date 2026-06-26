@@ -26,6 +26,7 @@ import (
 	"github.com/dothackerman/ksuite-mail/internal/config"
 	"github.com/dothackerman/ksuite-mail/internal/doctor"
 	"github.com/dothackerman/ksuite-mail/internal/mail"
+	"github.com/dothackerman/ksuite-mail/internal/policy"
 	"github.com/dothackerman/ksuite-mail/internal/refresh"
 )
 
@@ -169,6 +170,9 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 	}
 	results := make([]api.MessageSummary, 0, len(messages))
 	for _, msg := range messages {
+		if !cachedMessageAllowed(cfg, msg) {
+			continue
+		}
 		results = append(results, toMessageSummary(msg))
 	}
 
@@ -216,6 +220,9 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	}
 	results := make([]api.MessageSummary, 0, len(messages))
 	for _, msg := range messages {
+		if !cachedMessageAllowed(cfg, msg) {
+			continue
+		}
 		results = append(results, toMessageSummary(msg))
 	}
 
@@ -260,8 +267,8 @@ func (s *Server) handleShow(w http.ResponseWriter, r *http.Request) {
 	}
 
 	acct := accountByID(cfg, msg.AccountID)
-	if acct == nil {
-		s.writeError(w, http.StatusInternalServerError, "internal_error", "message account missing from configuration")
+	if acct == nil || !cachedMessageAllowedForAccount(*acct, msg) {
+		s.writeError(w, http.StatusNotFound, "not_found", "message not found")
 		return
 	}
 
@@ -302,7 +309,7 @@ func (s *Server) handleThread(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_, repo, refreshRes, err := s.refreshAndLoad(r.Context())
+	cfg, repo, refreshRes, err := s.refreshAndLoad(r.Context())
 	if err != nil {
 		s.writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
 		return
@@ -315,6 +322,10 @@ func (s *Server) handleThread(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !found {
+		s.writeError(w, http.StatusNotFound, "not_found", "message not found")
+		return
+	}
+	if !cachedMessageAllowed(cfg, seed) {
 		s.writeError(w, http.StatusNotFound, "not_found", "message not found")
 		return
 	}
@@ -332,6 +343,9 @@ func (s *Server) handleThread(w http.ResponseWriter, r *http.Request) {
 	for i, msg := range messages {
 		if i >= maxMessages {
 			break
+		}
+		if !cachedMessageAllowed(cfg, msg) {
+			continue
 		}
 		results = append(results, toMessageSummary(msg))
 	}
@@ -378,8 +392,8 @@ func (s *Server) handleContext(w http.ResponseWriter, r *http.Request) {
 	}
 
 	acct := accountByID(cfg, seed.AccountID)
-	if acct == nil {
-		s.writeError(w, http.StatusInternalServerError, "internal_error", "message account missing from configuration")
+	if acct == nil || !cachedMessageAllowedForAccount(*acct, seed) {
+		s.writeError(w, http.StatusNotFound, "not_found", "message not found")
 		return
 	}
 
@@ -400,6 +414,9 @@ func (s *Server) handleContext(w http.ResponseWriter, r *http.Request) {
 	timeline := make([]api.MessageSummary, 0, len(msgs))
 	var used int
 	for _, msg := range msgs {
+		if !cachedMessageAllowed(cfg, msg) {
+			continue
+		}
 		item := toMessageSummary(msg)
 		if item.ID == seed.ID {
 			continue
@@ -413,11 +430,15 @@ func (s *Server) handleContext(w http.ResponseWriter, r *http.Request) {
 
 	seedBody := ""
 	if seed.BodyText != "" {
+		remaining := budget - used
+		if remaining < 0 {
+			remaining = 0
+		}
 		seedBody = seed.BodyText
 		if acct.Policy == config.PolicyDomain {
 			seedBody = stripEmbeddedReplies(seedBody)
 		}
-		seedBody = truncateText(seedBody, defaultContextMax)
+		seedBody = truncateText(seedBody, min(defaultContextMax, remaining))
 	}
 	resp := api.ContextResponse{
 		Seed:          toMessageDetail(seed, seedBody, true),
@@ -462,9 +483,15 @@ func (s *Server) refreshAndLoad(ctx context.Context) (*config.Config, *cache.Rep
 	if src == nil {
 		return cfg, repo, refresh.Result{
 			Meta: cache.RefreshMeta{
-				Attempted: false,
-				RemoteOK:  true,
+				Attempted:               false,
+				RemoteOK:                false,
+				LastSuccessfulRefreshAt: repo.LatestRefreshAt(),
 			},
+			Partial: true,
+			Warnings: []refresh.Warning{{
+				Code:    "remote_source_unavailable",
+				Message: "remote refresh source is unavailable",
+			}},
 		}, nil
 	}
 
@@ -698,16 +725,47 @@ func accountByID(cfg *config.Config, id string) *config.Account {
 func toMessageSummary(m mail.CachedMessage) api.MessageSummary {
 	return api.MessageSummary{
 		ID:            m.ID,
+		Account:       m.AccountID,
+		Folder:        m.Folder,
 		Subject:       m.Subject,
 		From:          m.From,
 		To:            m.To,
 		Cc:            m.Cc,
 		Bcc:           m.Bcc,
+		Flags:         m.Flags,
 		ThreadKey:     m.ThreadKey,
 		Date:          m.Date,
 		Snippet:       m.Snippet,
 		VisibleReason: m.VisibleReason,
 	}
+}
+
+func cachedMessageAllowed(cfg *config.Config, msg mail.CachedMessage) bool {
+	acct := accountByID(cfg, msg.AccountID)
+	if acct == nil {
+		return false
+	}
+	return cachedMessageAllowedForAccount(*acct, msg)
+}
+
+func cachedMessageAllowedForAccount(acct config.Account, msg mail.CachedMessage) bool {
+	if acct.Policy != config.PolicyDomain {
+		return true
+	}
+	ok, _ := policy.DomainMatch(acct, mail.MessageEnvelope{
+		UID:       msg.UID,
+		MessageID: msg.MessageID,
+		ThreadKey: msg.ThreadKey,
+		Subject:   msg.Subject,
+		From:      msg.From,
+		To:        msg.To,
+		Cc:        msg.Cc,
+		Bcc:       msg.Bcc,
+		Date:      msg.Date,
+		Flags:     msg.Flags,
+		Snippet:   msg.Snippet,
+	})
+	return ok
 }
 
 func toMessageDetail(m mail.CachedMessage, body string, includeBody bool) api.MessageDetail {

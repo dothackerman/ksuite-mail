@@ -134,12 +134,15 @@ func TestListOverSocket(t *testing.T) {
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
-	if env.Status != api.StatusOK {
-		t.Fatalf("status = %q, want %q", env.Status, api.StatusOK)
+	if env.Status != api.StatusError {
+		t.Fatalf("status = %q, want %q", env.Status, api.StatusError)
 	}
 	var r api.ListResponse
 	if err := env.DecodeResult(&r); err != nil {
 		t.Fatalf("decode list response: %v", err)
+	}
+	if r.Refresh.RemoteOK {
+		t.Fatalf("refresh.remote_ok = true, want false")
 	}
 }
 
@@ -149,12 +152,15 @@ func TestSearchOverSocket(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
-	if env.Status != api.StatusOK {
-		t.Fatalf("status = %q, want %q", env.Status, api.StatusOK)
+	if env.Status != api.StatusError {
+		t.Fatalf("status = %q, want %q", env.Status, api.StatusError)
 	}
 	var r api.SearchResponse
 	if err := env.DecodeResult(&r); err != nil {
 		t.Fatalf("decode search response: %v", err)
+	}
+	if r.Refresh.RemoteOK {
+		t.Fatalf("refresh.remote_ok = true, want false")
 	}
 }
 

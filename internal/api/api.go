@@ -109,11 +109,14 @@ type RefreshMeta = cache.RefreshMeta
 // MessageSummary is a compact, account-safe cache read payload.
 type MessageSummary struct {
 	ID            string    `json:"id"`
+	Account       string    `json:"account"`
+	Folder        string    `json:"folder"`
 	Subject       string    `json:"subject"`
 	From          string    `json:"from"`
 	To            string    `json:"to"`
 	Cc            string    `json:"cc"`
 	Bcc           string    `json:"bcc"`
+	Flags         string    `json:"flags"`
 	ThreadKey     string    `json:"thread_key"`
 	Date          time.Time `json:"date"`
 	Snippet       string    `json:"snippet"`
@@ -223,9 +226,6 @@ func OKWithStatus(status string, result any, warnings ...Warning) (Envelope, err
 	raw, err := json.Marshal(result)
 	if err != nil {
 		return Envelope{}, fmt.Errorf("encode result: %w", err)
-	}
-	if status == StatusError {
-		return Envelope{}, fmt.Errorf("read status must not be error")
 	}
 	return Envelope{Status: status, Result: raw, Warnings: warnings}, nil
 }

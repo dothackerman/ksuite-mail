@@ -348,7 +348,7 @@ func (r *Repository) SearchMessages(filter QueryFilter) ([]mail.CachedMessage, e
 		limit = 100
 	}
 	clauses := []string{"messages_fts MATCH ?"}
-	args := []any{filter.Query}
+	args := []any{plainTextFTSQuery(filter.Query)}
 	if filter.AccountID != "" {
 		clauses = append(clauses, "m.account_id=?")
 		args = append(args, filter.AccountID)
@@ -382,6 +382,18 @@ func (r *Repository) SearchMessages(filter QueryFilter) ([]mail.CachedMessage, e
 		out = append(out, msg)
 	}
 	return out, rows.Err()
+}
+
+func plainTextFTSQuery(query string) string {
+	terms := strings.Fields(query)
+	if len(terms) == 0 {
+		return `""`
+	}
+	quoted := make([]string, 0, len(terms))
+	for _, term := range terms {
+		quoted = append(quoted, `"`+strings.ReplaceAll(term, `"`, `""`)+`"`)
+	}
+	return strings.Join(quoted, " ")
 }
 
 // ThreadMessages returns cached messages for one thread key.
