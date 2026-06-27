@@ -153,15 +153,26 @@ func refreshFolder(
 	if err != nil {
 		return err
 	}
-	envelopes, err := src.FetchEnvelopes(ctx, *account, folder, candidates)
-	if err != nil {
-		return err
+	keep := cache.UIDSetFromSlice(candidates)
+	fetchUIDs := candidates
+	if state != nil && state.PolicyFingerprint == fingerprint {
+		fetchUIDs, err = uncachedUIDs(ctxRepo, account.ID, folder, candidates)
+		if err != nil {
+			return err
+		}
+	}
+	var envelopes []mail.MessageEnvelope
+	if len(fetchUIDs) > 0 {
+		envelopes, err = src.FetchEnvelopes(ctx, *account, folder, fetchUIDs)
+		if err != nil {
+			return err
+		}
 	}
 
-	keep := cache.UIDSetFromSlice(nil)
 	for _, env := range envelopes {
 		ok, reason := policy.DomainMatch(*account, env)
 		if !ok {
+			delete(keep, env.UID)
 			continue
 		}
 		keep[env.UID] = struct{}{}
@@ -169,6 +180,9 @@ func refreshFolder(
 		bodyText, err := src.FetchBodyPreview(ctx, *account, folder, env.UID, previewBytes)
 		if err != nil {
 			return err
+		}
+		if account.Policy == config.PolicyDomain {
+			bodyText = stripEmbeddedReplies(bodyText)
 		}
 		msg := mail.CachedMessage{
 			ID:                  mail.PublicID(account.ID, folder, remote.UIDVALIDITY, env.UID),
@@ -231,6 +245,25 @@ func refreshFolder(
 		return err
 	}
 	return nil
+}
+
+func uncachedUIDs(repo *cache.Repository, accountID, folder string, candidates []mail.UID) ([]mail.UID, error) {
+	if len(candidates) == 0 {
+		return nil, nil
+	}
+	local, err := repo.ListUIDsForFolder(accountID, folder)
+	if err != nil {
+		return nil, err
+	}
+	cached := cache.UIDSetFromSlice(local)
+	out := make([]mail.UID, 0, len(candidates))
+	for _, uid := range candidates {
+		if _, ok := cached[uid]; ok {
+			continue
+		}
+		out = append(out, uid)
+	}
+	return out, nil
 }
 
 func discoverCandidates(
@@ -333,4 +366,23 @@ func remoteErrorCode(err error) string {
 		return remoteErrorCodePrefix + "timeout"
 	}
 	return remoteErrorCodePrefix + "source_error"
+}
+
+func stripEmbeddedReplies(body string) string {
+	if body == "" {
+		return body
+	}
+	lines := strings.Split(body, "\n")
+	out := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if isReplyBoundary(strings.TrimSpace(line)) {
+			break
+		}
+		out = append(out, line)
+	}
+	return strings.TrimSpace(strings.Join(out, "\n"))
+}
+
+func isReplyBoundary(line string) bool {
+	return strings.HasPrefix(line, "On ") && strings.Contains(line, "wrote:")
 }

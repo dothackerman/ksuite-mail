@@ -304,6 +304,57 @@ func TestDomainRefreshDoesNotDeleteCachedRowsWhenCandidateSearchIsCapped(t *test
 	}
 }
 
+func TestDomainRefreshStripsEmbeddedRepliesBeforeCaching(t *testing.T) {
+	cfg := &config.Config{Mail: config.Mail{Accounts: []config.Account{{
+		ID:       "acct",
+		Email:    "acct@example.com",
+		Host:     "imap.example.com",
+		Port:     993,
+		TLS:      boolPtr(true),
+		Username: "acct@example.com",
+		PasswordRef: config.PasswordRef{
+			Source:   config.PasswordSourceFile,
+			Provider: config.PasswordProviderLocal,
+			ID:       "/ksuite-mail/acct/password",
+		},
+		Policy:  config.PolicyDomain,
+		Domains: []string{"example.com"},
+		Folders: []string{"INBOX"},
+	}}}}
+	repo := mustOpenRepoForRefresh(t)
+	ad := mailfake.NewAdapter(map[string]map[string][]mailfake.Message{
+		"acct": {"INBOX": {{
+			UID: 1,
+			Envelope: mail.MessageEnvelope{
+				UID:       1,
+				From:      "alice@example.com",
+				Subject:   "reply",
+				ThreadKey: "thread",
+			},
+			Body:            "Current answer\nOn Friday, bob wrote:\nprivate quoted term",
+			VisibleByPolicy: true,
+		}}},
+	})
+
+	if _, err := refresh.Refresh(context.Background(), cfg, repo, ad, refresh.RefreshOptions{MaxCandidates: 10}); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	msgs, err := repo.SearchMessages(cache.QueryFilter{AccountID: "acct", Folder: "INBOX", Query: "private quoted term", Limit: 10})
+	if err != nil {
+		t.Fatalf("SearchMessages: %v", err)
+	}
+	if len(msgs) != 0 {
+		t.Fatalf("quoted reply text was indexed: %#v", msgs)
+	}
+	got, ok, err := repo.GetByPublicID(mail.PublicID("acct", "INBOX", 123, 1))
+	if err != nil {
+		t.Fatalf("GetByPublicID: %v", err)
+	}
+	if !ok || got.BodyText != "Current answer" {
+		t.Fatalf("cached body = %q, found=%v; want stripped current answer", got.BodyText, ok)
+	}
+}
+
 func TestRefreshPreservesLatestSuccessfulTimestampWhenAllFoldersFail(t *testing.T) {
 	cfg := &config.Config{Mail: config.Mail{Accounts: []config.Account{{
 		ID:       "acct",
@@ -561,6 +612,82 @@ func TestPolicyFingerprintChangeBypassesRemoteMetadataFastPath(t *testing.T) {
 	}
 	if state == nil || state.PolicyFingerprint != "domain:other.com" {
 		t.Fatalf("policy fingerprint = %+v, want updated domain", state)
+	}
+}
+
+func TestRefreshDoesNotRefetchCachedUIDBodiesWhenUIDNextIsUnchanged(t *testing.T) {
+	cfg := &config.Config{Mail: config.Mail{Accounts: []config.Account{{
+		ID:       "acct",
+		Email:    "acct@example.com",
+		Host:     "imap.example.com",
+		Port:     993,
+		TLS:      boolPtr(true),
+		Username: "acct@example.com",
+		PasswordRef: config.PasswordRef{
+			Source:   config.PasswordSourceFile,
+			Provider: config.PasswordProviderLocal,
+			ID:       "/ksuite-mail/acct/password",
+		},
+		Policy:  config.PolicyFull,
+		Folders: []string{"INBOX"},
+	}}}}
+	now := time.Now().UTC()
+	repo := mustOpenRepoForRefresh(t)
+	if err := repo.UpsertMessage(mail.CachedMessage{
+		ID:                  mail.PublicID("acct", "INBOX", 123, 1),
+		AccountID:           "acct",
+		Folder:              "INBOX",
+		UIDVALIDITY:         123,
+		UID:                 1,
+		MessageID:           "<cached>",
+		ThreadKey:           "thread",
+		Subject:             "cached",
+		From:                "a@example.com",
+		To:                  "b@example.com",
+		Date:                now,
+		Snippet:             "cached",
+		BodyText:            "cached body",
+		VisibleReason:       "policy_full",
+		ContentHash:         "h",
+		FirstLoadedAt:       now,
+		LastLoadedOrChecked: now,
+	}); err != nil {
+		t.Fatalf("seed cached message: %v", err)
+	}
+	if err := repo.UpsertFolderState(cache.FolderState{
+		AccountID:         "acct",
+		Folder:            "INBOX",
+		UIDVALIDITY:       123,
+		UIDNEXT:           2,
+		HighestModSeq:     0,
+		LastSeenUID:       1,
+		PolicyFingerprint: "full:",
+	}); err != nil {
+		t.Fatalf("seed folder state: %v", err)
+	}
+	ad := mailfake.NewAdapter(map[string]map[string][]mailfake.Message{
+		"acct": {"INBOX": {{
+			UID:             1,
+			Envelope:        mail.MessageEnvelope{UID: 1, From: "a@example.com", Subject: "cached"},
+			Body:            "remote body should not be fetched",
+			VisibleByPolicy: true,
+		}}},
+	})
+
+	if _, err := refresh.Refresh(context.Background(), cfg, repo, ad, refresh.RefreshOptions{MaxCandidates: 10}); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	for _, call := range ad.CallsSnapshot() {
+		if call.Method == "fetch" || call.Method == "preview" {
+			t.Fatalf("unexpected remote content fetch for cached UID: %+v", call)
+		}
+	}
+	got, ok, err := repo.GetByPublicID(mail.PublicID("acct", "INBOX", 123, 1))
+	if err != nil {
+		t.Fatalf("GetByPublicID: %v", err)
+	}
+	if !ok || got.BodyText != "cached body" {
+		t.Fatalf("cached body = %q, found=%v; want existing cached body", got.BodyText, ok)
 	}
 }
 

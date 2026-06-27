@@ -144,6 +144,44 @@ func TestReadListEndpointReturnsMessageSummaries(t *testing.T) {
 	}
 }
 
+func TestReadListOmitsBccFromSummaryJSON(t *testing.T) {
+	adapter := mailfake.NewAdapter(map[string]map[string][]mailfake.Message{
+		"acct": {
+			"INBOX": {
+				{
+					UID: 1,
+					Envelope: mail.MessageEnvelope{
+						UID:       1,
+						Subject:   "sent",
+						From:      "alice@example.com",
+						To:        "bob@example.com",
+						Bcc:       "private@example.net",
+						ThreadKey: "thread",
+					},
+					VisibleByPolicy: true,
+					Body:            "preview",
+				},
+			},
+			"Sent": {},
+		},
+	})
+	ts := newLocalHTTPServer(t, deploymentWithSource(t, validDomainConfig, adapter))
+	defer ts.Close()
+
+	res := postJSON(t, ts.Client(), ts.URL+"/v1/list", map[string]any{"account": "acct", "folder": "INBOX", "limit": 10})
+	defer func() { _ = res.Body.Close() }()
+	var raw map[string]any
+	if err := json.NewDecoder(res.Body).Decode(&raw); err != nil {
+		t.Fatalf("decode raw response: %v", err)
+	}
+	result := raw["result"].(map[string]any)
+	results := result["results"].([]any)
+	summary := results[0].(map[string]any)
+	if _, ok := summary["bcc"]; ok {
+		t.Fatalf("summary exposed bcc: %#v", summary)
+	}
+}
+
 func TestReadShowOmitsReplyChainForDomainAccount(t *testing.T) {
 	adapter := mailfake.NewAdapter(map[string]map[string][]mailfake.Message{
 		"acct": {
@@ -443,6 +481,126 @@ func TestReadContextCapsSeedBodyByBudget(t *testing.T) {
 	}
 	if len(got.Seed.BodyText) > 25 {
 		t.Fatalf("seed body length = %d, want <= 25", len(got.Seed.BodyText))
+	}
+}
+
+func TestReadShowTruncatesBodyByRunes(t *testing.T) {
+	adapter := mailfake.NewAdapter(map[string]map[string][]mailfake.Message{
+		"acct": {
+			"INBOX": {
+				{
+					UID: 8,
+					Envelope: mail.MessageEnvelope{
+						UID:       8,
+						Subject:   "unicode",
+						From:      "alice@example.com",
+						ThreadKey: "thread",
+					},
+					Body:            "éxtra",
+					VisibleByPolicy: true,
+				},
+			},
+			"Sent": {},
+		},
+	})
+	ts := newLocalHTTPServer(t, deploymentWithSource(t, validDomainConfig, adapter))
+	defer ts.Close()
+	listRes := postJSON(t, ts.Client(), ts.URL+"/v1/list", map[string]any{"account": "acct", "folder": "INBOX"})
+	var listEnv api.Envelope
+	if err := json.NewDecoder(listRes.Body).Decode(&listEnv); err != nil {
+		t.Fatalf("decode list: %v", err)
+	}
+	_ = listRes.Body.Close()
+	var list api.ListResponse
+	if err := listEnv.DecodeResult(&list); err != nil || len(list.Results) != 1 {
+		t.Fatalf("decode list payload: %v len=%d", err, len(list.Results))
+	}
+
+	showRes := postJSON(t, ts.Client(), ts.URL+"/v1/show", map[string]any{"id": list.Results[0].ID, "preview": true, "max_chars": 1})
+	defer func() { _ = showRes.Body.Close() }()
+	env := decodeEnvelopeBody(t, showRes.Body)
+	var got api.ShowResponse
+	if err := env.DecodeResult(&got); err != nil {
+		t.Fatalf("decode show: %v", err)
+	}
+	if got.Result.BodyText != "é" {
+		t.Fatalf("body = %q, want first rune", got.Result.BodyText)
+	}
+}
+
+func TestReadListRefreshWindowUsesRequestedLimit(t *testing.T) {
+	cfg := strings.Replace(validDomainConfig, "default_limit = 50", "default_limit = 1", 1)
+	adapter := mailfake.NewAdapter(map[string]map[string][]mailfake.Message{
+		"acct": {
+			"INBOX": {
+				{
+					UID:      1,
+					Envelope: mail.MessageEnvelope{UID: 1, From: "alice@example.com", Subject: "one", ThreadKey: "t1", Date: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)},
+					Body:     "one", VisibleByPolicy: true,
+				},
+				{
+					UID:      2,
+					Envelope: mail.MessageEnvelope{UID: 2, From: "alice@example.com", Subject: "two", ThreadKey: "t2", Date: time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)},
+					Body:     "two", VisibleByPolicy: true,
+				},
+				{
+					UID:      3,
+					Envelope: mail.MessageEnvelope{UID: 3, From: "alice@example.com", Subject: "three", ThreadKey: "t3", Date: time.Date(2026, 1, 3, 0, 0, 0, 0, time.UTC)},
+					Body:     "three", VisibleByPolicy: true,
+				},
+			},
+			"Sent": {},
+		},
+	})
+	ts := newLocalHTTPServer(t, deploymentWithSource(t, cfg, adapter))
+	defer ts.Close()
+
+	res := postJSON(t, ts.Client(), ts.URL+"/v1/list", map[string]any{"account": "acct", "folder": "INBOX", "limit": 2})
+	defer func() { _ = res.Body.Close() }()
+	env := decodeEnvelopeBody(t, res.Body)
+	var got api.ListResponse
+	if err := env.DecodeResult(&got); err != nil {
+		t.Fatalf("decode list response: %v", err)
+	}
+	if len(got.Results) != 2 {
+		t.Fatalf("results = %d, want requested page filled", len(got.Results))
+	}
+}
+
+func TestReadListRejectsCachedRowsFromUnconfiguredFolders(t *testing.T) {
+	const fullConfig = `[mail]
+default_limit = 50
+
+[[mail.accounts]]
+id = "acct"
+email = "acct@example.com"
+host = "imap.example.com"
+port = 993
+tls = true
+username = "acct@example.com"
+password_ref = { source = "file", provider = "local", id = "/ksuite-mail/acct/password" }
+policy = "full"
+folders = ["INBOX"]
+`
+	adapter := mailfake.NewAdapter(map[string]map[string][]mailfake.Message{"acct": {"INBOX": {}}})
+	adapter.SetFailure("select", "acct", "INBOX", "", fmt.Errorf("remote down"))
+	opts := deploymentWithSource(t, fullConfig, adapter)
+	now := time.Now().UTC()
+	msg := cachedForDaemon("msg_removed_folder", "thread", "alice@example.com", now, 9)
+	msg.Folder = "Sent"
+	seedDaemonCache(t, opts.StateDir, msg)
+	ts := newLocalHTTPServer(t, opts)
+	defer ts.Close()
+
+	res := postJSON(t, ts.Client(), ts.URL+"/v1/list", map[string]any{"account": "acct", "limit": 10})
+	defer func() { _ = res.Body.Close() }()
+	env := decodeEnvelopeBody(t, res.Body)
+	var got api.ListResponse
+	if err := env.DecodeResult(&got); err != nil {
+		t.Fatalf("decode list response: %v", err)
+	}
+	if len(got.Results) != 0 {
+		t.Fatalf("results = %#v, want removed folder row hidden", got.Results)
 	}
 }
 

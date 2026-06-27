@@ -115,7 +115,6 @@ type MessageSummary struct {
 	From          string    `json:"from"`
 	To            string    `json:"to"`
 	Cc            string    `json:"cc"`
-	Bcc           string    `json:"bcc"`
 	Flags         string    `json:"flags"`
 	ThreadKey     string    `json:"thread_key"`
 	Date          time.Time `json:"date"`

@@ -150,7 +150,9 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cfg, repo, refreshRes, err := s.refreshAndLoad(r.Context())
+	limit := withDefault(0, req.Limit, defaultLimit)
+	offset := max(0, req.Offset)
+	cfg, repo, refreshRes, err := s.refreshAndLoad(r.Context(), limit+offset)
 	if err != nil {
 		s.writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
 		return
@@ -165,7 +167,7 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 		filter.Limit = batchLimit
 		filter.Offset = batchOffset
 		return repo.ListMessages(filter)
-	}, withDefault(cfg.Mail.DefaultLimit, req.Limit, defaultLimit), max(0, req.Offset))
+	}, withDefault(cfg.Mail.DefaultLimit, req.Limit, defaultLimit), offset)
 	if err != nil {
 		s.writeError(w, http.StatusInternalServerError, "internal_error", "could not query cache")
 		return
@@ -194,7 +196,9 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cfg, repo, refreshRes, err := s.refreshAndLoad(r.Context())
+	limit := withDefault(0, req.Limit, defaultLimit)
+	offset := max(0, req.Offset)
+	cfg, repo, refreshRes, err := s.refreshAndLoad(r.Context(), limit+offset)
 	if err != nil {
 		s.writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
 		return
@@ -210,7 +214,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		filter.Limit = batchLimit
 		filter.Offset = batchOffset
 		return repo.SearchMessages(filter)
-	}, withDefault(cfg.Mail.DefaultLimit, req.Limit, defaultLimit), max(0, req.Offset))
+	}, withDefault(cfg.Mail.DefaultLimit, req.Limit, defaultLimit), offset)
 	if err != nil {
 		s.writeError(w, http.StatusInternalServerError, "internal_error", "could not search cache")
 		return
@@ -239,7 +243,7 @@ func (s *Server) handleShow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cfg, repo, refreshRes, err := s.refreshAndLoad(r.Context())
+	cfg, repo, refreshRes, err := s.refreshAndLoad(r.Context(), defaultLimit)
 	if err != nil {
 		s.writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
 		return
@@ -299,7 +303,7 @@ func (s *Server) handleThread(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cfg, repo, refreshRes, err := s.refreshAndLoad(r.Context())
+	cfg, repo, refreshRes, err := s.refreshAndLoad(r.Context(), defaultLimit)
 	if err != nil {
 		s.writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
 		return
@@ -364,7 +368,7 @@ func (s *Server) handleContext(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cfg, repo, refreshRes, err := s.refreshAndLoad(r.Context())
+	cfg, repo, refreshRes, err := s.refreshAndLoad(r.Context(), defaultLimit)
 	if err != nil {
 		s.writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
 		return
@@ -494,7 +498,7 @@ func visibleMessagePage(
 	}
 }
 
-func (s *Server) refreshAndLoad(ctx context.Context) (*config.Config, *cache.Repository, refresh.Result, error) {
+func (s *Server) refreshAndLoad(ctx context.Context, minCandidates int) (*config.Config, *cache.Repository, refresh.Result, error) {
 	cfg, err := s.loadConfig()
 	if err != nil {
 		return nil, nil, refresh.Result{}, err
@@ -529,7 +533,7 @@ func (s *Server) refreshAndLoad(ctx context.Context) (*config.Config, *cache.Rep
 	res, err := refresh.Refresh(ctx, cfg, repo, src, refresh.RefreshOptions{
 		Now:           time.Now,
 		PreviewBytes:  refresh.DefaultPreviewBytes,
-		MaxCandidates: withDefault(cfg.Mail.DefaultLimit, 0, defaultLimit),
+		MaxCandidates: max(withDefault(cfg.Mail.DefaultLimit, 0, defaultLimit), minCandidates),
 	})
 	if err != nil {
 		return nil, nil, refresh.Result{}, err
@@ -726,10 +730,16 @@ func min(a, b int) int {
 }
 
 func truncateText(s string, maxChars int) string {
-	if maxChars <= 0 || len(s) <= maxChars {
+	if maxChars <= 0 {
 		return s
 	}
-	return s[:maxChars]
+	for i := range s {
+		if maxChars == 0 {
+			return s[:i]
+		}
+		maxChars--
+	}
+	return s
 }
 
 func cleanupExpired(repo *cache.Repository, cfg *config.Config) error {
@@ -762,7 +772,6 @@ func toMessageSummary(m mail.CachedMessage) api.MessageSummary {
 		From:          m.From,
 		To:            m.To,
 		Cc:            m.Cc,
-		Bcc:           m.Bcc,
 		Flags:         m.Flags,
 		ThreadKey:     m.ThreadKey,
 		Date:          m.Date,
@@ -780,6 +789,9 @@ func cachedMessageAllowed(cfg *config.Config, msg mail.CachedMessage) bool {
 }
 
 func cachedMessageAllowedForAccount(acct config.Account, msg mail.CachedMessage) bool {
+	if !accountAllowsFolder(acct, msg.Folder) {
+		return false
+	}
 	if acct.Policy != config.PolicyDomain {
 		return true
 	}
@@ -797,6 +809,15 @@ func cachedMessageAllowedForAccount(acct config.Account, msg mail.CachedMessage)
 		Snippet:   msg.Snippet,
 	})
 	return ok
+}
+
+func accountAllowsFolder(acct config.Account, folder string) bool {
+	for _, allowed := range acct.Folders {
+		if allowed == folder {
+			return true
+		}
+	}
+	return false
 }
 
 func toMessageDetail(m mail.CachedMessage, body string, includeBody bool) api.MessageDetail {
