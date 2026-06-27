@@ -136,6 +136,9 @@ func refreshFolder(
 	if state != nil && state.PolicyFingerprint == fingerprint &&
 		state.UIDVALIDITY == remote.UIDVALIDITY && state.UIDNEXT == remote.UIDNEXT &&
 		state.HighestModSeq != 0 && state.HighestModSeq == remote.HighestModSeq {
+		if err := ctxRepo.MarkFolderVerified(account.ID, folder, remote.UIDVALIDITY, now); err != nil {
+			return err
+		}
 		return ctxRepo.UpsertFolderState(cache.FolderState{
 			AccountID:             account.ID,
 			Folder:                folder,
@@ -184,6 +187,10 @@ func refreshFolder(
 		if account.Policy == config.PolicyDomain {
 			bodyText = stripEmbeddedReplies(bodyText)
 		}
+		snippet := env.Snippet
+		if account.Policy == config.PolicyDomain {
+			snippet = stripEmbeddedReplies(snippet)
+		}
 		msg := mail.CachedMessage{
 			ID:                  mail.PublicID(account.ID, folder, remote.UIDVALIDITY, env.UID),
 			AccountID:           account.ID,
@@ -200,7 +207,7 @@ func refreshFolder(
 			Date:                env.Date,
 			Flags:               env.Flags,
 			HasAttachments:      env.HasAttachments,
-			Snippet:             env.Snippet,
+			Snippet:             snippet,
 			BodyText:            bodyText,
 			VisibleReason:       reason,
 			ContentHash:         env.ContentHash,

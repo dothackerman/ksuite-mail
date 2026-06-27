@@ -349,7 +349,7 @@ func (r *Repository) ListMessages(filter QueryFilter) ([]mail.CachedMessage, err
 	if len(clauses) > 0 {
 		stmt += " WHERE " + strings.Join(clauses, " AND ")
 	}
-	stmt += " ORDER BY datetime(date) DESC LIMIT ? OFFSET ?"
+	stmt += " ORDER BY datetime(date) DESC, uid DESC, public_id DESC LIMIT ? OFFSET ?"
 	args = append(args, limit, filter.Offset)
 
 	rows, err := r.db.Query(stmt, args...)
@@ -396,7 +396,7 @@ func (r *Repository) SearchMessages(filter QueryFilter) ([]mail.CachedMessage, e
 	FROM messages_fts f
 	JOIN messages m ON m.public_id = f.public_id`
 	stmt += " WHERE " + strings.Join(clauses, " AND ")
-	stmt += " ORDER BY datetime(m.date) DESC LIMIT ? OFFSET ?"
+	stmt += " ORDER BY datetime(m.date) DESC, m.uid DESC, m.public_id DESC LIMIT ? OFFSET ?"
 	args = append(args, limit, filter.Offset)
 
 	rows, err := r.db.Query(stmt, args...)
@@ -434,7 +434,7 @@ func (r *Repository) ThreadMessages(accountID, threadKey string) ([]mail.CachedM
 		message_id, thread_key, subject, from_text, to_text, cc_text, bcc_text,
 		date, flags, has_attachments, snippet, body_text, visible_reason, content_hash,
 		first_loaded_at, last_loaded_or_verified_at
-	FROM messages WHERE account_id=? AND thread_key=? ORDER BY datetime(date) DESC`,
+	FROM messages WHERE account_id=? AND thread_key=? ORDER BY datetime(date) DESC, uid DESC, public_id DESC`,
 		accountID, threadKey)
 	if err != nil {
 		return nil, err
@@ -467,6 +467,18 @@ func (r *Repository) ListUIDsForFolder(accountID, folder string) ([]mail.UID, er
 		out = append(out, mail.UID(uid))
 	}
 	return out, rows.Err()
+}
+
+// MarkFolderVerified refreshes TTL verification time for cached rows known to
+// be covered by a successful no-change folder refresh.
+func (r *Repository) MarkFolderVerified(accountID, folder string, uidvalidity uint64, checkedAt time.Time) error {
+	verified := checkedAt.UTC().Format(time.RFC3339Nano)
+	_, err := r.db.Exec(`
+		UPDATE messages
+		SET last_loaded_or_verified_at=?, updated_at=?
+		WHERE account_id=? AND folder=? AND uidvalidity=?`,
+		verified, r.now().UTC().Format(time.RFC3339Nano), accountID, folder, uidvalidity)
+	return err
 }
 
 // DeleteByMessageRef removes one local row including its FTS entry.

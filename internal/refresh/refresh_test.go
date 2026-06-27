@@ -329,6 +329,7 @@ func TestDomainRefreshStripsEmbeddedRepliesBeforeCaching(t *testing.T) {
 				UID:       1,
 				From:      "alice@example.com",
 				Subject:   "reply",
+				Snippet:   "Current answer\nOn Friday, bob wrote:\nprivate quoted term",
 				ThreadKey: "thread",
 			},
 			Body:            "Current answer\nOn Friday, bob wrote:\nprivate quoted term",
@@ -352,6 +353,16 @@ func TestDomainRefreshStripsEmbeddedRepliesBeforeCaching(t *testing.T) {
 	}
 	if !ok || got.BodyText != "Current answer" {
 		t.Fatalf("cached body = %q, found=%v; want stripped current answer", got.BodyText, ok)
+	}
+	if got.Snippet != "Current answer" {
+		t.Fatalf("cached snippet = %q, want stripped current answer", got.Snippet)
+	}
+	msgs, err = repo.SearchMessages(cache.QueryFilter{AccountID: "acct", Folder: "INBOX", Query: "Current answer", Limit: 10})
+	if err != nil {
+		t.Fatalf("SearchMessages current answer: %v", err)
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("current snippet text was not indexed: %#v", msgs)
 	}
 }
 
@@ -688,6 +699,79 @@ func TestRefreshDoesNotRefetchCachedUIDBodiesWhenUIDNextIsUnchanged(t *testing.T
 	}
 	if !ok || got.BodyText != "cached body" {
 		t.Fatalf("cached body = %q, found=%v; want existing cached body", got.BodyText, ok)
+	}
+}
+
+func TestFastPathRefreshMarksCachedFolderRowsVerified(t *testing.T) {
+	cfg := &config.Config{Mail: config.Mail{Accounts: []config.Account{{
+		ID:       "acct",
+		Email:    "acct@example.com",
+		Host:     "imap.example.com",
+		Port:     993,
+		TLS:      boolPtr(true),
+		Username: "acct@example.com",
+		PasswordRef: config.PasswordRef{
+			Source:   config.PasswordSourceFile,
+			Provider: config.PasswordProviderLocal,
+			ID:       "/ksuite-mail/acct/password",
+		},
+		Policy:  config.PolicyFull,
+		Folders: []string{"INBOX"},
+	}}}}
+	old := time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC)
+	now := time.Date(2026, 1, 2, 12, 0, 0, 0, time.UTC)
+	repo := mustOpenRepoForRefresh(t)
+	if err := repo.UpsertMessage(mail.CachedMessage{
+		ID:                  mail.PublicID("acct", "INBOX", 123, 1),
+		AccountID:           "acct",
+		Folder:              "INBOX",
+		UIDVALIDITY:         123,
+		UID:                 1,
+		MessageID:           "<cached>",
+		ThreadKey:           "thread",
+		Subject:             "cached",
+		From:                "a@example.com",
+		To:                  "b@example.com",
+		Date:                old,
+		Snippet:             "cached",
+		BodyText:            "cached body",
+		VisibleReason:       "policy_full",
+		ContentHash:         "h",
+		FirstLoadedAt:       old,
+		LastLoadedOrChecked: old,
+	}); err != nil {
+		t.Fatalf("seed cached message: %v", err)
+	}
+	if err := repo.UpsertFolderState(cache.FolderState{
+		AccountID:         "acct",
+		Folder:            "INBOX",
+		UIDVALIDITY:       123,
+		UIDNEXT:           2,
+		HighestModSeq:     99,
+		LastSeenUID:       1,
+		PolicyFingerprint: "full:",
+	}); err != nil {
+		t.Fatalf("seed folder state: %v", err)
+	}
+	ad := mailfake.NewAdapter(map[string]map[string][]mailfake.Message{
+		"acct": {"INBOX": {{
+			UID:             1,
+			Envelope:        mail.MessageEnvelope{UID: 1, From: "a@example.com", Subject: "cached"},
+			Body:            "remote body should not be fetched",
+			VisibleByPolicy: true,
+		}}},
+	})
+	ad.SetHighestModSeq("acct", "INBOX", 99)
+
+	if _, err := refresh.Refresh(context.Background(), cfg, repo, ad, refresh.RefreshOptions{Now: func() time.Time { return now }}); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	got, ok, err := repo.GetByPublicID(mail.PublicID("acct", "INBOX", 123, 1))
+	if err != nil {
+		t.Fatalf("GetByPublicID: %v", err)
+	}
+	if !ok || !got.LastLoadedOrChecked.Equal(now) {
+		t.Fatalf("LastLoadedOrChecked = %v, found=%v; want %v", got.LastLoadedOrChecked, ok, now)
 	}
 }
 

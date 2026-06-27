@@ -38,6 +38,7 @@ const (
 	defaultLimit      = 100
 	defaultBudget     = 1200
 	defaultContextMax = 1200
+	maxReadWindow     = 1000
 )
 
 // source matches the narrow read-only adapter interface.
@@ -150,8 +151,11 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	limit := withDefault(0, req.Limit, defaultLimit)
-	offset := max(0, req.Offset)
+	limit, offset, ok := normalizeReadPage(req.Limit, req.Offset)
+	if !ok {
+		s.writeError(w, http.StatusBadRequest, "bad_request", "limit plus offset exceeds maximum read window")
+		return
+	}
 	cfg, repo, refreshRes, err := s.refreshAndLoad(r.Context(), limit+offset)
 	if err != nil {
 		s.writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
@@ -167,7 +171,7 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 		filter.Limit = batchLimit
 		filter.Offset = batchOffset
 		return repo.ListMessages(filter)
-	}, withDefault(cfg.Mail.DefaultLimit, req.Limit, defaultLimit), offset)
+	}, effectiveReadLimit(cfg.Mail.DefaultLimit, req.Limit), offset)
 	if err != nil {
 		s.writeError(w, http.StatusInternalServerError, "internal_error", "could not query cache")
 		return
@@ -196,8 +200,11 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	limit := withDefault(0, req.Limit, defaultLimit)
-	offset := max(0, req.Offset)
+	limit, offset, ok := normalizeReadPage(req.Limit, req.Offset)
+	if !ok {
+		s.writeError(w, http.StatusBadRequest, "bad_request", "limit plus offset exceeds maximum read window")
+		return
+	}
 	cfg, repo, refreshRes, err := s.refreshAndLoad(r.Context(), limit+offset)
 	if err != nil {
 		s.writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
@@ -214,7 +221,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		filter.Limit = batchLimit
 		filter.Offset = batchOffset
 		return repo.SearchMessages(filter)
-	}, withDefault(cfg.Mail.DefaultLimit, req.Limit, defaultLimit), offset)
+	}, effectiveReadLimit(cfg.Mail.DefaultLimit, req.Limit), offset)
 	if err != nil {
 		s.writeError(w, http.StatusInternalServerError, "internal_error", "could not search cache")
 		return
@@ -496,6 +503,23 @@ func visibleMessagePage(
 		}
 		rawOffset += len(messages)
 	}
+}
+
+func normalizeReadPage(requestedLimit, requestedOffset int) (int, int, bool) {
+	limit := withDefault(0, requestedLimit, defaultLimit)
+	offset := max(0, requestedOffset)
+	if limit+offset > maxReadWindow {
+		return 0, 0, false
+	}
+	return limit, offset, true
+}
+
+func effectiveReadLimit(configDefault, requestedLimit int) int {
+	limit := withDefault(configDefault, requestedLimit, defaultLimit)
+	if limit > maxReadWindow {
+		return maxReadWindow
+	}
+	return limit
 }
 
 func (s *Server) refreshAndLoad(ctx context.Context, minCandidates int) (*config.Config, *cache.Repository, refresh.Result, error) {

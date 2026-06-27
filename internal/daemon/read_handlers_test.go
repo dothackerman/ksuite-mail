@@ -567,6 +567,36 @@ func TestReadListRefreshWindowUsesRequestedLimit(t *testing.T) {
 	}
 }
 
+func TestReadListRejectsOversizedRefreshWindow(t *testing.T) {
+	adapter := mailfake.NewAdapter(map[string]map[string][]mailfake.Message{"acct": {"INBOX": {}, "Sent": {}}})
+	ts := newLocalHTTPServer(t, deploymentWithSource(t, validDomainConfig, adapter))
+	defer ts.Close()
+
+	res := postJSON(t, ts.Client(), ts.URL+"/v1/list", map[string]any{"account": "acct", "folder": "INBOX", "limit": 1000000})
+	defer func() { _ = res.Body.Close() }()
+	if res.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", res.StatusCode)
+	}
+	if calls := adapter.CallsSnapshot(); len(calls) != 0 {
+		t.Fatalf("remote refresh ran for oversized request: %+v", calls)
+	}
+}
+
+func TestReadSearchRejectsOversizedRefreshWindow(t *testing.T) {
+	adapter := mailfake.NewAdapter(map[string]map[string][]mailfake.Message{"acct": {"INBOX": {}, "Sent": {}}})
+	ts := newLocalHTTPServer(t, deploymentWithSource(t, validDomainConfig, adapter))
+	defer ts.Close()
+
+	res := postJSON(t, ts.Client(), ts.URL+"/v1/search", map[string]any{"account": "acct", "folder": "INBOX", "query": "invoice", "offset": 1000000})
+	defer func() { _ = res.Body.Close() }()
+	if res.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", res.StatusCode)
+	}
+	if calls := adapter.CallsSnapshot(); len(calls) != 0 {
+		t.Fatalf("remote refresh ran for oversized request: %+v", calls)
+	}
+}
+
 func TestReadListRejectsCachedRowsFromUnconfiguredFolders(t *testing.T) {
 	const fullConfig = `[mail]
 default_limit = 50

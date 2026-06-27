@@ -288,6 +288,67 @@ func TestDeleteByMessageRefAlsoRemovesFTSIndex(t *testing.T) {
 	}
 }
 
+func TestThreadMessagesUsesStableTieBreakerForSameDate(t *testing.T) {
+	t.Parallel()
+
+	repo := mustOpenRepo(t, filepath.Join(t.TempDir(), "mail.db"))
+	defer func() { _ = repo.Close() }()
+	now := time.Now().UTC().Truncate(time.Second)
+
+	for _, msg := range []mail.CachedMessage{
+		{
+			ID:                  "msg_lower_uid",
+			AccountID:           "acct",
+			Folder:              "INBOX",
+			UIDVALIDITY:         10,
+			UID:                 1,
+			MessageID:           "<lower@case>",
+			ThreadKey:           "thread-tie",
+			Subject:             "lower",
+			From:                "a@x",
+			To:                  "b@x",
+			Date:                now,
+			Snippet:             "lower",
+			BodyText:            "lower",
+			VisibleReason:       "full",
+			ContentHash:         "lower",
+			FirstLoadedAt:       now,
+			LastLoadedOrChecked: now,
+		},
+		{
+			ID:                  "msg_higher_uid",
+			AccountID:           "acct",
+			Folder:              "INBOX",
+			UIDVALIDITY:         10,
+			UID:                 2,
+			MessageID:           "<higher@case>",
+			ThreadKey:           "thread-tie",
+			Subject:             "higher",
+			From:                "a@x",
+			To:                  "b@x",
+			Date:                now,
+			Snippet:             "higher",
+			BodyText:            "higher",
+			VisibleReason:       "full",
+			ContentHash:         "higher",
+			FirstLoadedAt:       now,
+			LastLoadedOrChecked: now,
+		},
+	} {
+		if err := repo.UpsertMessage(msg); err != nil {
+			t.Fatalf("UpsertMessage(%s): %v", msg.ID, err)
+		}
+	}
+
+	got, err := repo.ThreadMessages("acct", "thread-tie")
+	if err != nil {
+		t.Fatalf("ThreadMessages: %v", err)
+	}
+	if len(got) != 2 || got[0].ID != "msg_higher_uid" || got[1].ID != "msg_lower_uid" {
+		t.Fatalf("thread order = %#v, want higher UID before lower UID for equal dates", got)
+	}
+}
+
 func TestSeedFromStateDirCreatesPath(t *testing.T) {
 	t.Parallel()
 
