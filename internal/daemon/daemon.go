@@ -484,8 +484,10 @@ func visibleMessagePage(
 	results := make([]api.MessageSummary, 0, limit)
 	visibleSkipped := 0
 	rawOffset := 0
-	for {
-		messages, err := load(batchSize, rawOffset)
+	for rawOffset < maxReadWindow {
+		remainingWindow := maxReadWindow - rawOffset
+		readLimit := min(batchSize, remainingWindow)
+		messages, err := load(readLimit, rawOffset)
 		if err != nil {
 			return nil, err
 		}
@@ -502,11 +504,12 @@ func visibleMessagePage(
 				return results, nil
 			}
 		}
-		if len(messages) < batchSize {
+		if len(messages) < readLimit {
 			return results, nil
 		}
 		rawOffset += len(messages)
 	}
+	return results, nil
 }
 
 func visibleThreadMessages(
@@ -520,8 +523,10 @@ func visibleThreadMessages(
 	batchSize := max(defaultLimit, limit)
 	results := make([]api.MessageSummary, 0, limit)
 	rawOffset := 0
-	for {
-		messages, err := load(batchSize, rawOffset)
+	for rawOffset < maxReadWindow {
+		remainingWindow := maxReadWindow - rawOffset
+		readLimit := min(batchSize, remainingWindow)
+		messages, err := load(readLimit, rawOffset)
 		if err != nil {
 			return nil, err
 		}
@@ -534,11 +539,12 @@ func visibleThreadMessages(
 				return results, nil
 			}
 		}
-		if len(messages) < batchSize {
+		if len(messages) < readLimit {
 			return results, nil
 		}
 		rawOffset += len(messages)
 	}
+	return results, nil
 }
 
 func boundedThreadContext(

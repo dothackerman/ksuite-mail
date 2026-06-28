@@ -2,6 +2,8 @@ package refresh_test
 
 import (
 	"context"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -363,6 +365,105 @@ func TestDomainRefreshStripsEmbeddedRepliesBeforeCaching(t *testing.T) {
 	}
 	if len(msgs) != 1 {
 		t.Fatalf("current snippet text was not indexed: %#v", msgs)
+	}
+}
+
+func TestFullRefreshStripsEmbeddedRepliesBeforeCaching(t *testing.T) {
+	cfg := &config.Config{Mail: config.Mail{Accounts: []config.Account{{
+		ID:       "acct",
+		Email:    "acct@example.com",
+		Host:     "imap.example.com",
+		Port:     993,
+		TLS:      boolPtr(true),
+		Username: "acct@example.com",
+		PasswordRef: config.PasswordRef{
+			Source:   config.PasswordSourceFile,
+			Provider: config.PasswordProviderLocal,
+			ID:       "/ksuite-mail/acct/password",
+		},
+		Policy:  config.PolicyFull,
+		Folders: []string{"INBOX"},
+	}}}}
+	repo := mustOpenRepoForRefresh(t)
+	ad := mailfake.NewAdapter(map[string]map[string][]mailfake.Message{
+		"acct": {"INBOX": {{
+			UID: 1,
+			Envelope: mail.MessageEnvelope{
+				UID:     1,
+				From:    "alice@example.com",
+				Subject: "reply",
+				Snippet: "Current answer\nOn Friday, bob wrote:\nprivate quoted term",
+			},
+			Body: "Current answer\nOn Friday, bob wrote:\nprivate quoted term",
+		}}},
+	})
+
+	if _, err := refresh.Refresh(context.Background(), cfg, repo, ad, refresh.RefreshOptions{MaxCandidates: 10}); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	msgs, err := repo.SearchMessages(cache.QueryFilter{AccountID: "acct", Folder: "INBOX", Query: "private quoted term", Limit: 10})
+	if err != nil {
+		t.Fatalf("SearchMessages: %v", err)
+	}
+	if len(msgs) != 0 {
+		t.Fatalf("quoted reply text was indexed for full policy: %#v", msgs)
+	}
+	got, ok, err := repo.GetByPublicID(mail.PublicID("acct", "INBOX", 123, 1))
+	if err != nil {
+		t.Fatalf("GetByPublicID: %v", err)
+	}
+	if !ok || got.BodyText != "Current answer" || got.Snippet != "Current answer" {
+		t.Fatalf("cached full-policy preview = body %q snippet %q found=%v, want stripped current answer", got.BodyText, got.Snippet, ok)
+	}
+}
+
+func TestFullRefreshBoundsRemoteUIDListing(t *testing.T) {
+	cfg := &config.Config{Mail: config.Mail{Accounts: []config.Account{{
+		ID:       "acct",
+		Email:    "acct@example.com",
+		Host:     "imap.example.com",
+		Port:     993,
+		TLS:      boolPtr(true),
+		Username: "acct@example.com",
+		PasswordRef: config.PasswordRef{
+			Source:   config.PasswordSourceFile,
+			Provider: config.PasswordProviderLocal,
+			ID:       "/ksuite-mail/acct/password",
+		},
+		Policy:  config.PolicyFull,
+		Folders: []string{"INBOX"},
+	}}}}
+	messages := make([]mailfake.Message, 20)
+	for i := range messages {
+		uid := mail.UID(i + 1)
+		messages[i] = mailfake.Message{
+			UID:      uid,
+			Envelope: mail.MessageEnvelope{UID: uid, From: "alice@example.com", Subject: "bounded"},
+			Body:     "bounded",
+		}
+	}
+	ad := mailfake.NewAdapter(map[string]map[string][]mailfake.Message{"acct": {"INBOX": messages}})
+	repo := mustOpenRepoForRefresh(t)
+
+	if _, err := refresh.Refresh(context.Background(), cfg, repo, ad, refresh.RefreshOptions{MaxCandidates: 5}); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	var listPayload string
+	for _, call := range ad.CallsSnapshot() {
+		if call.Method == "list" {
+			listPayload = call.Payload
+			break
+		}
+	}
+	if listPayload != "16:21" {
+		t.Fatalf("list UID range = %q, want bounded 16:21", listPayload)
+	}
+	state, err := repo.FolderState("acct", "INBOX")
+	if err != nil {
+		t.Fatalf("FolderState: %v", err)
+	}
+	if state == nil || state.HighestModSeq != 0 {
+		t.Fatalf("folder state = %+v, want incomplete marker after bounded listing", state)
 	}
 }
 
@@ -959,6 +1060,82 @@ func TestFastPathRefreshMarksCachedFolderRowsVerified(t *testing.T) {
 	if !ok || !got.LastLoadedOrChecked.Equal(now) {
 		t.Fatalf("LastLoadedOrChecked = %v, found=%v; want %v", got.LastLoadedOrChecked, ok, now)
 	}
+}
+
+func TestRefreshSerializesSameFolderCycles(t *testing.T) {
+	cfg := &config.Config{Mail: config.Mail{Accounts: []config.Account{{
+		ID:       "acct",
+		Email:    "acct@example.com",
+		Host:     "imap.example.com",
+		Port:     993,
+		TLS:      boolPtr(true),
+		Username: "acct@example.com",
+		PasswordRef: config.PasswordRef{
+			Source:   config.PasswordSourceFile,
+			Provider: config.PasswordProviderLocal,
+			ID:       "/ksuite-mail/acct/password",
+		},
+		Policy:  config.PolicyFull,
+		Folders: []string{"INBOX"},
+	}}}}
+	repo := mustOpenRepoForRefresh(t)
+	src := &trackingSource{delay: 25 * time.Millisecond}
+
+	var wg sync.WaitGroup
+	errs := make(chan error, 2)
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := refresh.Refresh(context.Background(), cfg, repo, src, refresh.RefreshOptions{MaxCandidates: 10})
+			errs <- err
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("Refresh: %v", err)
+		}
+	}
+	if got := atomic.LoadInt32(&src.maxActiveSelects); got != 1 {
+		t.Fatalf("concurrent selects for same folder = %d, want serialized", got)
+	}
+}
+
+type trackingSource struct {
+	activeSelects    int32
+	maxActiveSelects int32
+	delay            time.Duration
+}
+
+func (s *trackingSource) SelectFolder(context.Context, config.Account, string) (mail.RemoteFolderState, error) {
+	active := atomic.AddInt32(&s.activeSelects, 1)
+	for {
+		maxSeen := atomic.LoadInt32(&s.maxActiveSelects)
+		if active <= maxSeen || atomic.CompareAndSwapInt32(&s.maxActiveSelects, maxSeen, active) {
+			break
+		}
+	}
+	time.Sleep(s.delay)
+	atomic.AddInt32(&s.activeSelects, -1)
+	return mail.RemoteFolderState{UIDVALIDITY: 123, UIDNEXT: 1}, nil
+}
+
+func (s *trackingSource) SearchAllowed(context.Context, config.Account, string, string, string, mail.UIDRange) ([]mail.UID, error) {
+	return nil, nil
+}
+
+func (s *trackingSource) ListUIDs(context.Context, config.Account, string, mail.UIDRange) ([]mail.UID, error) {
+	return nil, nil
+}
+
+func (s *trackingSource) FetchEnvelopes(context.Context, config.Account, string, []mail.UID) ([]mail.MessageEnvelope, error) {
+	return nil, nil
+}
+
+func (s *trackingSource) FetchBodyPreview(context.Context, config.Account, string, mail.UID, int) (string, error) {
+	return "", nil
 }
 
 func mustOpenRepoForRefresh(t *testing.T) *cache.Repository {

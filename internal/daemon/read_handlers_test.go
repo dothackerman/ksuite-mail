@@ -887,6 +887,41 @@ folders = ["INBOX"]
 	}
 }
 
+func TestVisibleMessagePageStopsAtRawReadWindow(t *testing.T) {
+	cfg := &config.Config{Mail: config.Mail{Accounts: []config.Account{{
+		ID:      "acct",
+		Policy:  config.PolicyFull,
+		Folders: []string{"INBOX"},
+	}}}}
+	loadCalls := 0
+	rawRows := 0
+	results, err := visibleMessagePage(cfg, func(limit, offset int) ([]mail.CachedMessage, error) {
+		loadCalls++
+		if offset >= maxReadWindow {
+			t.Fatalf("load offset = %d, want bounded below %d", offset, maxReadWindow)
+		}
+		rawRows += limit
+		out := make([]mail.CachedMessage, limit)
+		for i := range out {
+			out[i] = cachedForDaemon("msg_disallowed", "thread", "alice@example.com", time.Now().UTC(), mail.UID(offset+i+1))
+			out[i].Folder = "Removed"
+		}
+		return out, nil
+	}, 1, 0)
+	if err != nil {
+		t.Fatalf("visibleMessagePage: %v", err)
+	}
+	if len(results) != 0 {
+		t.Fatalf("results = %#v, want no visible rows", results)
+	}
+	if rawRows != maxReadWindow {
+		t.Fatalf("raw rows scanned = %d, want cap at %d", rawRows, maxReadWindow)
+	}
+	if loadCalls == 0 {
+		t.Fatalf("load was not called")
+	}
+}
+
 func TestReadNoSourceReturnsErrorEnvelopeInsteadOfSuccessfulNoop(t *testing.T) {
 	ts := newLocalHTTPServer(t, deploymentWithSource(t, validDomainConfig, nil))
 	defer ts.Close()

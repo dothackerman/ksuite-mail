@@ -6,6 +6,7 @@ import (
 	"errors"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/dothackerman/ksuite-mail/internal/cache"
@@ -28,6 +29,8 @@ type Warning struct {
 const (
 	remoteErrorCodePrefix = "remote_"
 )
+
+var folderRefreshLocks sync.Map
 
 // Result summarizes one refresh cycle.
 type Result struct {
@@ -129,6 +132,9 @@ func refreshFolder(
 	now time.Time,
 	maxCandidates int,
 ) error {
+	unlock := lockRefreshFolder(account.ID, folder)
+	defer unlock()
+
 	state, err := ctxRepo.FolderState(account.ID, folder)
 	if err != nil {
 		return localCacheError{err: err}
@@ -206,13 +212,8 @@ func refreshFolder(
 		if err != nil {
 			return err
 		}
-		if account.Policy == config.PolicyDomain {
-			bodyText = stripEmbeddedReplies(bodyText)
-		}
-		snippet := env.Snippet
-		if account.Policy == config.PolicyDomain {
-			snippet = stripEmbeddedReplies(snippet)
-		}
+		bodyText = stripEmbeddedReplies(bodyText)
+		snippet := stripEmbeddedReplies(env.Snippet)
 		msg := mail.CachedMessage{
 			ID:                  mail.PublicID(account.ID, folder, remote.UIDVALIDITY, env.UID),
 			AccountID:           account.ID,
@@ -329,6 +330,11 @@ func discoverCandidates(
 	if uidNext > 0 {
 		scope.Max = uidNext
 	}
+	completeScope := true
+	if maxCandidates > 0 && uidNext > uint64(maxCandidates)+1 {
+		scope.Min = uidNext - uint64(maxCandidates)
+		completeScope = false
+	}
 
 	if account.Policy != config.PolicyDomain {
 		uids, err := src.ListUIDs(ctx, *account, folder, scope)
@@ -338,7 +344,7 @@ func discoverCandidates(
 		if maxCandidates > 0 && len(uids) > maxCandidates {
 			return uids[len(uids)-maxCandidates:], false, nil
 		}
-		return uids, true, nil
+		return uids, completeScope, nil
 	}
 
 	var out []mail.UID
@@ -360,7 +366,15 @@ func discoverCandidates(
 	if maxCandidates > 0 && len(out) > maxCandidates {
 		return out[len(out)-maxCandidates:], false, nil
 	}
-	return out, true, nil
+	return out, completeScope, nil
+}
+
+func lockRefreshFolder(accountID, folder string) func() {
+	key := accountID + "\x00" + folder
+	lockAny, _ := folderRefreshLocks.LoadOrStore(key, &sync.Mutex{})
+	lock := lockAny.(*sync.Mutex)
+	lock.Lock()
+	return lock.Unlock
 }
 
 func policyFingerprint(account *config.Account) string {
