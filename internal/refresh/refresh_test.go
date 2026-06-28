@@ -515,6 +515,62 @@ func TestIncrementalRefreshRemovesDeletedExistingUIDsWhenDiscoveryComplete(t *te
 	}
 }
 
+func TestCompleteRefreshDropsUIDThatVanishesBeforeEnvelopeFetch(t *testing.T) {
+	cfg := &config.Config{Mail: config.Mail{Accounts: []config.Account{{
+		ID:       "acct",
+		Email:    "acct@example.com",
+		Host:     "imap.example.com",
+		Port:     993,
+		TLS:      boolPtr(true),
+		Username: "acct@example.com",
+		PasswordRef: config.PasswordRef{
+			Source:   config.PasswordSourceFile,
+			Provider: config.PasswordProviderLocal,
+			ID:       "/ksuite-mail/acct/password",
+		},
+		Policy:  config.PolicyDomain,
+		Domains: []string{"example.com"},
+		Folders: []string{"INBOX"},
+	}}}}
+	now := time.Now().UTC()
+	repo := mustOpenRepoForRefresh(t)
+	if err := repo.UpsertMessage(mail.CachedMessage{
+		ID:                  mail.PublicID("acct", "INBOX", 123, 1),
+		AccountID:           "acct",
+		Folder:              "INBOX",
+		UIDVALIDITY:         123,
+		UID:                 1,
+		MessageID:           "<vanished>",
+		ThreadKey:           "thread-vanished",
+		Subject:             "vanished",
+		From:                "a@example.com",
+		To:                  "b@example.com",
+		Date:                now,
+		Snippet:             "vanished",
+		BodyText:            "vanished",
+		VisibleReason:       "policy_domain",
+		ContentHash:         "h",
+		LastLoadedOrChecked: now,
+		FirstLoadedAt:       now,
+	}); err != nil {
+		t.Fatalf("seed cached message: %v", err)
+	}
+
+	ad := mailfake.NewAdapter(map[string]map[string][]mailfake.Message{
+		"acct": {"INBOX": {}},
+	})
+	ad.SetSearchResult("acct", "INBOX", "From", "example.com", []mail.UID{1})
+
+	if _, err := refresh.Refresh(context.Background(), cfg, repo, ad, refresh.RefreshOptions{}); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	if _, ok, err := repo.GetByPublicID(mail.PublicID("acct", "INBOX", 123, 1)); err != nil {
+		t.Fatalf("GetByPublicID vanished: %v", err)
+	} else if ok {
+		t.Fatalf("vanished remote UID remained cached")
+	}
+}
+
 func TestFullRefreshCapsCandidatesWithoutRecordingCompleteState(t *testing.T) {
 	cfg := &config.Config{Mail: config.Mail{Accounts: []config.Account{{
 		ID:       "acct",

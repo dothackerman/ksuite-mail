@@ -182,7 +182,7 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 		Results: results,
 		Refresh: refreshRes.Meta,
 	}
-	status := api.ReadStatus(refreshRes.Meta, refreshRes.Partial, len(results) > 0)
+	status := readStatusForScope(refreshRes, req.Account, req.Folder, len(results) > 0)
 	s.writeReadOK(w, status, resp, refreshRes.Warnings)
 }
 
@@ -232,7 +232,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		Results: results,
 		Refresh: refreshRes.Meta,
 	}
-	status := api.ReadStatus(refreshRes.Meta, refreshRes.Partial, len(results) > 0)
+	status := readStatusForScope(refreshRes, req.Account, req.Folder, len(results) > 0)
 	s.writeReadOK(w, status, resp, refreshRes.Warnings)
 }
 
@@ -410,9 +410,7 @@ func (s *Server) handleContext(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	msgs, err := boundedThreadContext(cfg, seed.ID, budget, func(batchLimit, batchOffset int) ([]mail.CachedMessage, error) {
-		return repo.ThreadMessages(seed.AccountID, seed.ThreadKey, batchLimit, batchOffset)
-	})
+	msgs, err := boundedThreadContext(cfg, seed.ID, budget, threadMessagesLoader(repo, seed))
 	if err != nil {
 		s.writeError(w, http.StatusInternalServerError, "internal_error", "could not read thread")
 		return
@@ -440,10 +438,7 @@ func (s *Server) handleContext(w http.ResponseWriter, r *http.Request) {
 		if remaining < 0 {
 			remaining = 0
 		}
-		seedBody = seed.BodyText
-		if acct.Policy == config.PolicyDomain {
-			seedBody = stripEmbeddedReplies(seedBody)
-		}
+		seedBody = stripEmbeddedReplies(seed.BodyText)
 		if remaining > 0 {
 			seedBody = truncateText(seedBody, min(defaultContextMax, remaining))
 		} else {
@@ -602,10 +597,49 @@ func normalizeContextBudget(requestedBudget int) (int, bool) {
 func normalizeReadPage(requestedLimit, requestedOffset int) (int, int, bool) {
 	limit := withDefault(0, requestedLimit, defaultLimit)
 	offset := max(0, requestedOffset)
-	if limit+offset > maxReadWindow {
+	if limit > maxReadWindow || offset > maxReadWindow-limit {
 		return 0, 0, false
 	}
 	return limit, offset, true
+}
+
+func threadMessagesLoader(repo *cache.Repository, seed mail.CachedMessage) func(int, int) ([]mail.CachedMessage, error) {
+	return func(batchLimit, batchOffset int) ([]mail.CachedMessage, error) {
+		if strings.TrimSpace(seed.ThreadKey) == "" {
+			if batchOffset > 0 {
+				return nil, nil
+			}
+			return []mail.CachedMessage{seed}, nil
+		}
+		return repo.ThreadMessages(seed.AccountID, seed.ThreadKey, batchLimit, batchOffset)
+	}
+}
+
+func readStatusForScope(refreshRes refresh.Result, requestedAccount, requestedFolder string, localFound bool) string {
+	if !refreshRes.Partial || refreshAffectsScope(refreshRes.Warnings, requestedAccount, requestedFolder) {
+		return api.ReadStatus(refreshRes.Meta, refreshRes.Partial, localFound)
+	}
+	meta := refreshRes.Meta
+	meta.RemoteOK = true
+	return api.ReadStatus(meta, false, localFound)
+}
+
+func refreshAffectsScope(warnings []refresh.Warning, requestedAccount, requestedFolder string) bool {
+	account := accountFilter(requestedAccount)
+	folder := strings.TrimSpace(requestedFolder)
+	for _, warning := range warnings {
+		if warning.AccountID == "" {
+			return true
+		}
+		if account != "" && warning.AccountID != account {
+			continue
+		}
+		if folder != "" && warning.Folder != "" && warning.Folder != folder {
+			continue
+		}
+		return true
+	}
+	return len(warnings) == 0
 }
 
 func effectiveReadLimit(configDefault, requestedLimit int) int {

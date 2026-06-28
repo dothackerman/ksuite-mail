@@ -19,8 +19,10 @@ const DefaultPreviewBytes = 4096
 
 // Warning carries a structured, redacted remote or policy warning for command responses.
 type Warning struct {
-	Code    string
-	Message string
+	Code      string
+	Message   string
+	AccountID string
+	Folder    string
 }
 
 const (
@@ -96,8 +98,10 @@ func Refresh(ctx context.Context, cfg *config.Config, repo *cache.Repository, sr
 				allSuccess = false
 				res.Partial = true
 				res.Warnings = append(res.Warnings, Warning{
-					Code:    remoteErrorCode(err),
-					Message: "remote refresh failed for one or more folders",
+					Code:      remoteErrorCode(err),
+					Message:   "remote refresh failed for one or more folders",
+					AccountID: account.ID,
+					Folder:    folder,
 				})
 				continue
 			}
@@ -169,12 +173,17 @@ func refreshFolder(
 	if err != nil {
 		return err
 	}
-	keep := cache.UIDSetFromSlice(candidates)
+	keep := cache.UIDSet{}
 	fetchUIDs := candidates
 	if state != nil && state.PolicyFingerprint == fingerprint && cachedUIDsAreCurrent(state, remote) {
 		fetchUIDs, err = uncachedUIDs(ctxRepo, account.ID, folder, candidates)
 		if err != nil {
 			return localCacheError{err: err}
+		}
+		for _, uid := range candidates {
+			if !uidInSlice(fetchUIDs, uid) {
+				keep[uid] = struct{}{}
+			}
 		}
 	}
 	var envelopes []mail.MessageEnvelope
@@ -297,6 +306,15 @@ func uncachedUIDs(repo *cache.Repository, accountID, folder string, candidates [
 		out = append(out, uid)
 	}
 	return out, nil
+}
+
+func uidInSlice(uids []mail.UID, needle mail.UID) bool {
+	for _, uid := range uids {
+		if uid == needle {
+			return true
+		}
+	}
+	return false
 }
 
 func discoverCandidates(

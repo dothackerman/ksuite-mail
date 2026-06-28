@@ -393,6 +393,71 @@ func TestReadContextOmitsReplyChainForDomainAccount(t *testing.T) {
 	}
 }
 
+func TestReadContextOmitsReplyChainForFullAccount(t *testing.T) {
+	adapter := mailfake.NewAdapter(map[string]map[string][]mailfake.Message{
+		"acct": {
+			"INBOX": {
+				{
+					UID: 40,
+					Envelope: mail.MessageEnvelope{
+						UID:       40,
+						Subject:   "full context",
+						From:      "alice@example.com",
+						ThreadKey: "thread",
+						Snippet:   "seed",
+					},
+					Body:            "Current answer\nOn Friday, alice wrote:\n> prior thread line",
+					VisibleByPolicy: true,
+				},
+			},
+			"Sent": {},
+		},
+	})
+	ts := newLocalHTTPServer(t, deploymentWithSource(t, validFullConfig, adapter))
+	defer ts.Close()
+
+	listRes := postJSON(t, ts.Client(), ts.URL+"/v1/list", map[string]any{"account": "acct", "folder": "INBOX"})
+	var listEnv api.Envelope
+	if err := json.NewDecoder(listRes.Body).Decode(&listEnv); err != nil {
+		t.Fatalf("decode list: %v", err)
+	}
+	_ = listRes.Body.Close()
+	var list api.ListResponse
+	if err := listEnv.DecodeResult(&list); err != nil || len(list.Results) != 1 {
+		t.Fatalf("list response decode: %v len=%d", err, len(list.Results))
+	}
+
+	ctxRes := postJSON(t, ts.Client(), ts.URL+"/v1/context", map[string]any{"id": list.Results[0].ID, "budget": 200})
+	defer func() { _ = ctxRes.Body.Close() }()
+	env := decodeEnvelopeBody(t, ctxRes.Body)
+	var got api.ContextResponse
+	if err := env.DecodeResult(&got); err != nil {
+		t.Fatalf("decode context result: %v", err)
+	}
+	if strings.Contains(got.Seed.BodyText, "On Friday") {
+		t.Fatalf("context body leaked reply boundary text: %q", got.Seed.BodyText)
+	}
+}
+
+func TestReadListEmptyScopedPageIgnoresUnrelatedFolderRefreshFailure(t *testing.T) {
+	adapter := mailfake.NewAdapter(map[string]map[string][]mailfake.Message{
+		"acct": {
+			"INBOX": {},
+			"Sent":  {},
+		},
+	})
+	adapter.SetFailure("select", "acct", "Sent", "", fmt.Errorf("sent folder down"))
+	ts := newLocalHTTPServer(t, deploymentWithSource(t, validFullConfig, adapter))
+	defer ts.Close()
+
+	res := postJSON(t, ts.Client(), ts.URL+"/v1/list", map[string]any{"account": "acct", "folder": "INBOX"})
+	defer func() { _ = res.Body.Close() }()
+	env := decodeEnvelopeBody(t, res.Body)
+	if env.Status != api.StatusOK {
+		t.Fatalf("status = %q, want %q for empty page with unrelated folder failure", env.Status, api.StatusOK)
+	}
+}
+
 func TestReadListWarningPropagatesOnRefreshFailure(t *testing.T) {
 	adapter := mailfake.NewAdapter(map[string]map[string][]mailfake.Message{
 		"acct": {
@@ -948,6 +1013,37 @@ func TestReadThreadWithEmptyThreadKeyReturnsOnlySeedMessage(t *testing.T) {
 	}
 	if len(got.Messages) != 1 || got.Messages[0].ID != "msg_seed_empty_thread" {
 		t.Fatalf("thread messages = %#v, want only seed row for empty thread key", got.Messages)
+	}
+}
+
+func TestReadContextWithEmptyThreadKeyReturnsNoUnrelatedTimeline(t *testing.T) {
+	adapter := mailfake.NewAdapter(map[string]map[string][]mailfake.Message{"acct": {"INBOX": {}, "Sent": {}}})
+	adapter.SetFailure("select", "acct", "INBOX", "", fmt.Errorf("remote down"))
+	opts := deploymentWithSource(t, validFullConfig, adapter)
+	now := time.Now().UTC()
+	seedDaemonCache(t, opts.StateDir,
+		cachedForDaemon("msg_seed_empty_context", "", "alice@example.com", now, 1),
+		cachedForDaemon("msg_other_empty_context", "", "carol@example.com", now.Add(-time.Hour), 2),
+	)
+	ts := newLocalHTTPServer(t, opts)
+	defer ts.Close()
+
+	res := postJSON(t, ts.Client(), ts.URL+"/v1/context", map[string]any{"id": "msg_seed_empty_context", "budget": 200})
+	defer func() { _ = res.Body.Close() }()
+	env := decodeEnvelopeBody(t, res.Body)
+	var got api.ContextResponse
+	if err := env.DecodeResult(&got); err != nil {
+		t.Fatalf("decode context response: %v", err)
+	}
+	if len(got.Timeline) != 0 {
+		t.Fatalf("timeline = %#v, want no unrelated empty-thread messages", got.Timeline)
+	}
+}
+
+func TestNormalizeReadPageRejectsOverflowWindow(t *testing.T) {
+	maxInt := int(^uint(0) >> 1)
+	if _, _, ok := normalizeReadPage(maxInt, maxInt); ok {
+		t.Fatalf("normalizeReadPage accepted overflowing window")
 	}
 }
 
