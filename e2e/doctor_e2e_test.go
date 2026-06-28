@@ -5,6 +5,7 @@ package e2e
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"net"
 	"os"
 	"os/exec"
@@ -59,6 +60,7 @@ func startDaemon(t *testing.T, cmd *exec.Cmd) *daemonRun {
 	done := make(chan error, 1)
 	go func() {
 		done <- cmd.Wait()
+		close(done)
 	}()
 	t.Cleanup(func() {
 		if cmd.Process == nil {
@@ -119,6 +121,32 @@ func daemonWaitForErr(daemon *daemonRun) error {
 		return err
 	default:
 		return nil
+	}
+}
+
+func TestDaemonDoneRemainsReadableAfterWaitForErr(t *testing.T) {
+	cmd := exec.Command("sh", "-c", "exit 7")
+	daemon := startDaemon(t, cmd)
+	deadline := time.Now().Add(2 * time.Second)
+	var waitErr error
+	for time.Now().Before(deadline) {
+		waitErr = daemonWaitForErr(daemon)
+		if waitErr != nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if waitErr == nil {
+		t.Fatalf("daemon did not exit before deadline")
+	}
+	var exitErr *exec.ExitError
+	if !errors.As(waitErr, &exitErr) {
+		t.Fatalf("daemonWaitForErr returned %T, want *exec.ExitError", waitErr)
+	}
+	select {
+	case <-daemon.done:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatalf("daemon done channel blocked after daemonWaitForErr consumed exit")
 	}
 }
 

@@ -171,7 +171,7 @@ func refreshFolder(
 	}
 	keep := cache.UIDSetFromSlice(candidates)
 	fetchUIDs := candidates
-	if state != nil && state.PolicyFingerprint == fingerprint {
+	if state != nil && state.PolicyFingerprint == fingerprint && cachedUIDsAreCurrent(state, remote) {
 		fetchUIDs, err = uncachedUIDs(ctxRepo, account.ID, folder, candidates)
 		if err != nil {
 			return localCacheError{err: err}
@@ -268,6 +268,16 @@ func refreshFolder(
 		return localCacheError{err: err}
 	}
 	return nil
+}
+
+func cachedUIDsAreCurrent(state *cache.FolderState, remote mail.RemoteFolderState) bool {
+	if state == nil {
+		return false
+	}
+	if remote.HighestModSeq == 0 {
+		return true
+	}
+	return state.HighestModSeq != 0 && state.HighestModSeq == remote.HighestModSeq
 }
 
 func uncachedUIDs(repo *cache.Repository, accountID, folder string, candidates []mail.UID) ([]mail.UID, error) {

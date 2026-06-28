@@ -84,8 +84,7 @@ func runSearch(args []string) int {
 		*query = fs.Args()[0]
 	}
 	if *query == "" {
-		fmt.Println("error: query is required")
-		return 2
+		return readValidationError("query is required")
 	}
 
 	return runReadCommand(*socket, func(ctx context.Context, c *udsclient.Client) (api.Envelope, error) {
@@ -121,8 +120,7 @@ func runShow(args []string) int {
 		*id = fs.Args()[0]
 	}
 	if *id == "" {
-		fmt.Println("error: id is required")
-		return 2
+		return readValidationError("id is required")
 	}
 
 	return runReadCommand(*socket, func(ctx context.Context, c *udsclient.Client) (api.Envelope, error) {
@@ -154,8 +152,7 @@ func runThread(args []string) int {
 		*id = fs.Args()[0]
 	}
 	if *id == "" {
-		fmt.Println("error: id is required")
-		return 2
+		return readValidationError("id is required")
 	}
 
 	return runReadCommand(*socket, func(ctx context.Context, c *udsclient.Client) (api.Envelope, error) {
@@ -185,8 +182,7 @@ func runContext(args []string) int {
 		*id = fs.Args()[0]
 	}
 	if *id == "" {
-		fmt.Println("error: id is required")
-		return 2
+		return readValidationError("id is required")
 	}
 
 	return runReadCommand(*socket, func(ctx context.Context, c *udsclient.Client) (api.Envelope, error) {
@@ -232,6 +228,11 @@ func flagName(arg string) (string, bool) {
 		return before, true
 	}
 	return name, false
+}
+
+func readValidationError(message string) int {
+	emitJSON(api.Err("bad_request", message))
+	return 2
 }
 
 func runReadCommand(socket string, fn func(context.Context, *udsclient.Client) (api.Envelope, error)) int {

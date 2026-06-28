@@ -709,6 +709,98 @@ func TestRefreshDoesNotRefetchCachedUIDBodiesWhenUIDNextIsUnchanged(t *testing.T
 	}
 }
 
+func TestRefreshRefetchesCachedUIDsWhenHighestModSeqChanges(t *testing.T) {
+	cfg := &config.Config{Mail: config.Mail{Accounts: []config.Account{{
+		ID:       "acct",
+		Email:    "acct@example.com",
+		Host:     "imap.example.com",
+		Port:     993,
+		TLS:      boolPtr(true),
+		Username: "acct@example.com",
+		PasswordRef: config.PasswordRef{
+			Source:   config.PasswordSourceFile,
+			Provider: config.PasswordProviderLocal,
+			ID:       "/ksuite-mail/acct/password",
+		},
+		Policy:  config.PolicyFull,
+		Folders: []string{"INBOX"},
+	}}}}
+	old := time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC)
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	repo := mustOpenRepoForRefresh(t)
+	if err := repo.UpsertMessage(mail.CachedMessage{
+		ID:                  mail.PublicID("acct", "INBOX", 123, 1),
+		AccountID:           "acct",
+		Folder:              "INBOX",
+		UIDVALIDITY:         123,
+		UID:                 1,
+		MessageID:           "<cached>",
+		ThreadKey:           "thread",
+		Subject:             "cached",
+		From:                "a@example.com",
+		To:                  "b@example.com",
+		Date:                old,
+		Flags:               "\\Seen",
+		Snippet:             "cached",
+		BodyText:            "cached body",
+		VisibleReason:       "policy_full",
+		ContentHash:         "h",
+		FirstLoadedAt:       old,
+		LastLoadedOrChecked: old,
+	}); err != nil {
+		t.Fatalf("seed cached message: %v", err)
+	}
+	if err := repo.UpsertFolderState(cache.FolderState{
+		AccountID:         "acct",
+		Folder:            "INBOX",
+		UIDVALIDITY:       123,
+		UIDNEXT:           2,
+		HighestModSeq:     99,
+		LastSeenUID:       1,
+		PolicyFingerprint: "full:",
+	}); err != nil {
+		t.Fatalf("seed folder state: %v", err)
+	}
+	ad := mailfake.NewAdapter(map[string]map[string][]mailfake.Message{
+		"acct": {"INBOX": {{
+			UID: 1,
+			Envelope: mail.MessageEnvelope{
+				UID:     1,
+				From:    "a@example.com",
+				Subject: "remote changed",
+				Flags:   "\\Answered",
+			},
+			Body:            "remote changed body",
+			VisibleByPolicy: true,
+		}}},
+	})
+	ad.SetHighestModSeq("acct", "INBOX", 100)
+
+	if _, err := refresh.Refresh(context.Background(), cfg, repo, ad, refresh.RefreshOptions{
+		MaxCandidates: 10,
+		Now:           func() time.Time { return now },
+	}); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	var sawFetch bool
+	for _, call := range ad.CallsSnapshot() {
+		if call.Method == "fetch" {
+			sawFetch = true
+			break
+		}
+	}
+	if !sawFetch {
+		t.Fatalf("expected fetch for cached UID after HIGHESTMODSEQ changed")
+	}
+	got, ok, err := repo.GetByPublicID(mail.PublicID("acct", "INBOX", 123, 1))
+	if err != nil {
+		t.Fatalf("GetByPublicID: %v", err)
+	}
+	if !ok || got.Flags != "\\Answered" || got.Subject != "remote changed" {
+		t.Fatalf("cached message after modseq change = %+v, found=%v", got, ok)
+	}
+}
+
 func TestRefreshReturnsLocalCacheErrorsInsteadOfRemoteWarnings(t *testing.T) {
 	cfg := &config.Config{Mail: config.Mail{Accounts: []config.Account{{
 		ID:       "acct",

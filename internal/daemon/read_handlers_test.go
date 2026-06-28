@@ -781,6 +781,41 @@ func TestReadNoSourceReturnsErrorEnvelopeInsteadOfSuccessfulNoop(t *testing.T) {
 	}
 }
 
+func TestReadThreadAndContextRejectOversizedBounds(t *testing.T) {
+	ts := newLocalHTTPServer(t, deploymentWithSource(t, validDomainConfig, nil))
+	defer ts.Close()
+
+	cases := []struct {
+		name    string
+		path    string
+		payload map[string]any
+	}{
+		{
+			name:    "thread max_messages",
+			path:    "/v1/thread",
+			payload: map[string]any{"id": "msg_any", "max_messages": maxReadWindow + 1},
+		},
+		{
+			name:    "context budget",
+			path:    "/v1/context",
+			payload: map[string]any{"id": "msg_any", "budget": maxContextBudget + 1},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			res := postJSON(t, ts.Client(), ts.URL+tc.path, tc.payload)
+			defer func() { _ = res.Body.Close() }()
+			if res.StatusCode != http.StatusBadRequest {
+				t.Fatalf("status code = %d, want %d", res.StatusCode, http.StatusBadRequest)
+			}
+			env := decodeEnvelopeBody(t, res.Body)
+			if env.Status != api.StatusError || env.Error == nil || env.Error.Code != "bad_request" {
+				t.Fatalf("envelope = %+v, want bad_request error", env)
+			}
+		})
+	}
+}
+
 func TestReadListAppliesPolicyBeforePagination(t *testing.T) {
 	adapter := mailfake.NewAdapter(map[string]map[string][]mailfake.Message{"acct": {"INBOX": {}, "Sent": {}}})
 	adapter.SetFailure("select", "acct", "INBOX", "", fmt.Errorf("remote down"))

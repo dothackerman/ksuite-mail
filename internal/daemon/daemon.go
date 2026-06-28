@@ -39,6 +39,7 @@ const (
 	defaultBudget     = 1200
 	defaultContextMax = 1200
 	maxReadWindow     = 1000
+	maxContextBudget  = 12 * 1024
 )
 
 // source matches the narrow read-only adapter interface.
@@ -312,6 +313,11 @@ func (s *Server) handleThread(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusBadRequest, "bad_request", "id is required")
 		return
 	}
+	maxMessages, ok := normalizeThreadLimit(req.MaxMessages)
+	if !ok {
+		s.writeError(w, http.StatusBadRequest, "bad_request", "max_messages exceeds maximum read window")
+		return
+	}
 
 	cfg, repo, refreshRes, err := s.refreshAndLoad(r.Context(), defaultLimit)
 	if err != nil {
@@ -335,10 +341,6 @@ func (s *Server) handleThread(w http.ResponseWriter, r *http.Request) {
 	if !cachedMessageAllowed(cfg, seed) {
 		s.writeError(w, http.StatusNotFound, "not_found", "message not found")
 		return
-	}
-	maxMessages := req.MaxMessages
-	if maxMessages <= 0 {
-		maxMessages = defaultLimit
 	}
 	results, err := visibleThreadMessages(cfg, func(batchLimit, batchOffset int) ([]mail.CachedMessage, error) {
 		return repo.ThreadMessages(seed.AccountID, seed.ThreadKey, batchLimit, batchOffset)
@@ -371,6 +373,11 @@ func (s *Server) handleContext(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusBadRequest, "bad_request", "id is required")
 		return
 	}
+	budget, ok := normalizeContextBudget(req.Budget)
+	if !ok {
+		s.writeError(w, http.StatusBadRequest, "bad_request", "budget exceeds maximum context budget")
+		return
+	}
 
 	cfg, repo, refreshRes, err := s.refreshAndLoad(r.Context(), defaultLimit)
 	if err != nil {
@@ -398,10 +405,6 @@ func (s *Server) handleContext(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	budget := req.Budget
-	if budget <= 0 {
-		budget = defaultBudget
-	}
 	msgs, err := boundedThreadContext(cfg, seed.ID, budget, func(batchLimit, batchOffset int) ([]mail.CachedMessage, error) {
 		return repo.ThreadMessages(seed.AccountID, seed.ThreadKey, batchLimit, batchOffset)
 	})
@@ -551,8 +554,9 @@ func boundedThreadContext(
 	out := make([]mail.CachedMessage, 0, defaultLimit)
 	rawOffset := 0
 	used := 0
-	for {
-		messages, err := load(batchSize, rawOffset)
+	for rawOffset < maxReadWindow {
+		remainingWindow := maxReadWindow - rawOffset
+		messages, err := load(min(batchSize, remainingWindow), rawOffset)
 		if err != nil {
 			return nil, err
 		}
@@ -571,6 +575,23 @@ func boundedThreadContext(
 		}
 		rawOffset += len(messages)
 	}
+	return out, nil
+}
+
+func normalizeThreadLimit(requestedLimit int) (int, bool) {
+	limit := withDefault(0, requestedLimit, defaultLimit)
+	if limit > maxReadWindow {
+		return 0, false
+	}
+	return limit, true
+}
+
+func normalizeContextBudget(requestedBudget int) (int, bool) {
+	budget := withDefault(0, requestedBudget, defaultBudget)
+	if budget > maxContextBudget {
+		return 0, false
+	}
+	return budget, true
 }
 
 func normalizeReadPage(requestedLimit, requestedOffset int) (int, int, bool) {

@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
 	"syscall"
 	"testing"
@@ -32,10 +34,34 @@ func TestReadStatusExitCodeMapsStatuses(t *testing.T) {
 	}
 }
 
-func TestRunSearchRequiresQueryFlag(t *testing.T) {
-	t.Parallel()
-	if got := runSearch([]string{}); got != 2 {
-		t.Fatalf("runSearch() = %d, want 2", got)
+func TestReadCommandValidationErrorsEmitJSON(t *testing.T) {
+	cases := []struct {
+		name string
+		run  func([]string) int
+		want string
+	}{
+		{name: "search query", run: runSearch, want: "query is required"},
+		{name: "show id", run: runShow, want: "id is required"},
+		{name: "thread id", run: runThread, want: "id is required"},
+		{name: "context id", run: runContext, want: "id is required"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			code, out := captureStdout(t, func() int {
+				return tc.run([]string{"--json"})
+			})
+			if code != 2 {
+				t.Fatalf("exit code = %d, want 2", code)
+			}
+			var env api.Envelope
+			if err := json.Unmarshal([]byte(out), &env); err != nil {
+				t.Fatalf("validation output is not JSON: %v\n%s", err, out)
+			}
+			if env.Status != api.StatusError || env.Error == nil ||
+				env.Error.Code != "bad_request" || env.Error.Message != tc.want {
+				t.Fatalf("validation envelope = %+v", env)
+			}
+		})
 	}
 }
 
@@ -195,4 +221,27 @@ func startReadCommandSocket(t *testing.T) (string, *[]capturedReadRequest) {
 		_ = srv.Shutdown(context.Background())
 	})
 	return socket, &requests
+}
+
+func captureStdout(t *testing.T, fn func() int) (int, string) {
+	t.Helper()
+	old := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe stdout: %v", err)
+	}
+	os.Stdout = w
+	defer func() { os.Stdout = old }()
+	code := fn()
+	if err := w.Close(); err != nil {
+		t.Fatalf("close stdout pipe writer: %v", err)
+	}
+	b, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("read stdout: %v", err)
+	}
+	if err := r.Close(); err != nil {
+		t.Fatalf("close stdout pipe reader: %v", err)
+	}
+	return code, string(b)
 }
