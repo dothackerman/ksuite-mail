@@ -106,6 +106,45 @@ func TestSearchMessagesTreatsPunctuationAsPlainText(t *testing.T) {
 	}
 }
 
+func TestSearchMessagesDoesNotIndexHiddenBcc(t *testing.T) {
+	t.Parallel()
+
+	repo := mustOpenRepo(t, filepath.Join(t.TempDir(), "mail.db"))
+	defer func() { _ = repo.Close() }()
+
+	now := time.Now().UTC().Truncate(time.Second)
+	if err := repo.UpsertMessage(mail.CachedMessage{
+		ID:                  "msg_hidden_bcc",
+		AccountID:           "acct",
+		Folder:              "Sent",
+		UIDVALIDITY:         10,
+		UID:                 12,
+		MessageID:           "<hidden-bcc@case>",
+		ThreadKey:           "thread-bcc",
+		Subject:             "visible sent mail",
+		From:                "alice@example.com",
+		To:                  "bob@example.com",
+		Bcc:                 "private-bcc@example.net",
+		Date:                now,
+		Snippet:             "visible sent mail",
+		BodyText:            "visible body",
+		VisibleReason:       "domain:from",
+		ContentHash:         "h",
+		FirstLoadedAt:       now,
+		LastLoadedOrChecked: now,
+	}); err != nil {
+		t.Fatalf("UpsertMessage: %v", err)
+	}
+
+	results, err := repo.SearchMessages(QueryFilter{Query: "private-bcc@example.net"})
+	if err != nil {
+		t.Fatalf("SearchMessages: %v", err)
+	}
+	if len(results) != 0 {
+		t.Fatalf("hidden bcc was searchable: %#v", results)
+	}
+}
+
 func TestCleanupUsesLastLoadedOrCheckedForTTL(t *testing.T) {
 	t.Parallel()
 
@@ -340,12 +379,53 @@ func TestThreadMessagesUsesStableTieBreakerForSameDate(t *testing.T) {
 		}
 	}
 
-	got, err := repo.ThreadMessages("acct", "thread-tie")
+	got, err := repo.ThreadMessages("acct", "thread-tie", 100, 0)
 	if err != nil {
 		t.Fatalf("ThreadMessages: %v", err)
 	}
 	if len(got) != 2 || got[0].ID != "msg_higher_uid" || got[1].ID != "msg_lower_uid" {
 		t.Fatalf("thread order = %#v, want higher UID before lower UID for equal dates", got)
+	}
+}
+
+func TestThreadMessagesAppliesLimitAndOffsetInQuery(t *testing.T) {
+	t.Parallel()
+
+	repo := mustOpenRepo(t, filepath.Join(t.TempDir(), "mail.db"))
+	defer func() { _ = repo.Close() }()
+	now := time.Now().UTC().Truncate(time.Second)
+
+	for i := 1; i <= 3; i++ {
+		msg := mail.CachedMessage{
+			ID:                  "msg_page_" + string(rune('0'+i)),
+			AccountID:           "acct",
+			Folder:              "INBOX",
+			UIDVALIDITY:         10,
+			UID:                 mail.UID(i),
+			MessageID:           "<page@case>",
+			ThreadKey:           "thread-page",
+			Subject:             "page",
+			From:                "a@x",
+			To:                  "b@x",
+			Date:                now.Add(time.Duration(i) * time.Minute),
+			Snippet:             "page",
+			BodyText:            "page",
+			VisibleReason:       "full",
+			ContentHash:         "page",
+			FirstLoadedAt:       now,
+			LastLoadedOrChecked: now,
+		}
+		if err := repo.UpsertMessage(msg); err != nil {
+			t.Fatalf("UpsertMessage(%s): %v", msg.ID, err)
+		}
+	}
+
+	got, err := repo.ThreadMessages("acct", "thread-page", 1, 1)
+	if err != nil {
+		t.Fatalf("ThreadMessages: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != "msg_page_2" {
+		t.Fatalf("paged thread = %#v, want second newest row", got)
 	}
 }
 

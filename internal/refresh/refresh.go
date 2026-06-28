@@ -34,6 +34,13 @@ type Result struct {
 	Partial  bool
 }
 
+type localCacheError struct {
+	err error
+}
+
+func (e localCacheError) Error() string { return e.err.Error() }
+func (e localCacheError) Unwrap() error { return e.err }
+
 type source interface {
 	SelectFolder(ctx context.Context, acct config.Account, folder string) (mail.RemoteFolderState, error)
 	SearchAllowed(ctx context.Context, acct config.Account, folder string, header string, value string, scope mail.UIDRange) ([]mail.UID, error)
@@ -83,6 +90,9 @@ func Refresh(ctx context.Context, cfg *config.Config, repo *cache.Repository, sr
 		account := &cfg.Mail.Accounts[i]
 		for _, folder := range account.Folders {
 			if err := refreshFolder(ctx, repo, src, account, folder, previewBytes, now, opts.MaxCandidates); err != nil {
+				if isLocalCacheError(err) {
+					return Result{}, err
+				}
 				allSuccess = false
 				res.Partial = true
 				res.Warnings = append(res.Warnings, Warning{
@@ -117,7 +127,7 @@ func refreshFolder(
 ) error {
 	state, err := ctxRepo.FolderState(account.ID, folder)
 	if err != nil {
-		return err
+		return localCacheError{err: err}
 	}
 	remote, err := src.SelectFolder(ctx, *account, folder)
 	if err != nil {
@@ -128,7 +138,7 @@ func refreshFolder(
 	// UIDVALIDITY changed => clear the local folder and restart from scratch.
 	if state != nil && state.UIDVALIDITY != remote.UIDVALIDITY {
 		if err := ctxRepo.DeleteByFolder(account.ID, folder); err != nil {
-			return err
+			return localCacheError{err: err}
 		}
 		state = nil
 	}
@@ -137,9 +147,9 @@ func refreshFolder(
 		state.UIDVALIDITY == remote.UIDVALIDITY && state.UIDNEXT == remote.UIDNEXT &&
 		state.HighestModSeq != 0 && state.HighestModSeq == remote.HighestModSeq {
 		if err := ctxRepo.MarkFolderVerified(account.ID, folder, remote.UIDVALIDITY, now); err != nil {
-			return err
+			return localCacheError{err: err}
 		}
-		return ctxRepo.UpsertFolderState(cache.FolderState{
+		if err := ctxRepo.UpsertFolderState(cache.FolderState{
 			AccountID:             account.ID,
 			Folder:                folder,
 			UIDVALIDITY:           remote.UIDVALIDITY,
@@ -149,7 +159,10 @@ func refreshFolder(
 			PolicyFingerprint:     fingerprint,
 			LastRefreshAttempted:  &now,
 			LastSuccessfulRefresh: &now,
-		})
+		}); err != nil {
+			return localCacheError{err: err}
+		}
+		return nil
 	}
 
 	candidates, complete, err := discoverCandidates(ctx, src, account, folder, remote.UIDNEXT, maxCandidates)
@@ -161,7 +174,7 @@ func refreshFolder(
 	if state != nil && state.PolicyFingerprint == fingerprint {
 		fetchUIDs, err = uncachedUIDs(ctxRepo, account.ID, folder, candidates)
 		if err != nil {
-			return err
+			return localCacheError{err: err}
 		}
 	}
 	var envelopes []mail.MessageEnvelope
@@ -215,13 +228,16 @@ func refreshFolder(
 			LastLoadedOrChecked: now,
 		}
 		if err := ctxRepo.UpsertMessage(msg); err != nil {
-			return err
+			return localCacheError{err: err}
 		}
 	}
 
 	if complete {
 		if err := ctxRepo.DeleteMissingByUIDSet(account.ID, folder, keep); err != nil {
-			return err
+			return localCacheError{err: err}
+		}
+		if err := ctxRepo.MarkFolderVerified(account.ID, folder, remote.UIDVALIDITY, now); err != nil {
+			return localCacheError{err: err}
 		}
 	}
 
@@ -249,7 +265,7 @@ func refreshFolder(
 		LastRefreshAttempted:  &now,
 		LastSuccessfulRefresh: &now,
 	}); err != nil {
-		return err
+		return localCacheError{err: err}
 	}
 	return nil
 }
@@ -373,6 +389,11 @@ func remoteErrorCode(err error) string {
 		return remoteErrorCodePrefix + "timeout"
 	}
 	return remoteErrorCodePrefix + "source_error"
+}
+
+func isLocalCacheError(err error) bool {
+	var local localCacheError
+	return errors.As(err, &local)
 }
 
 func stripEmbeddedReplies(body string) string {

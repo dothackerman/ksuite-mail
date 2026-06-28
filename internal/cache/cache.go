@@ -298,8 +298,8 @@ func (r *Repository) UpsertMessage(msg mail.CachedMessage) error {
 		return rollback(tx, fmt.Errorf("delete stale fts: %w", err))
 	}
 	if _, err := tx.Exec(`INSERT INTO messages_fts(public_id, subject, from_text, to_text, cc_text, bcc_text, snippet, body_text)
-		VALUES(?,?,?,?,?,?,?,?)`,
-		msg.ID, msg.Subject, msg.From, msg.To, msg.Cc, msg.Bcc, msg.Snippet, msg.BodyText,
+			VALUES(?,?,?,?,?,?,?,?)`,
+		msg.ID, msg.Subject, msg.From, msg.To, msg.Cc, "", msg.Snippet, msg.BodyText,
 	); err != nil {
 		return rollback(tx, fmt.Errorf("insert fts row: %w", err))
 	}
@@ -428,14 +428,17 @@ func plainTextFTSQuery(query string) string {
 }
 
 // ThreadMessages returns cached messages for one thread key.
-func (r *Repository) ThreadMessages(accountID, threadKey string) ([]mail.CachedMessage, error) {
+func (r *Repository) ThreadMessages(accountID, threadKey string, limit, offset int) ([]mail.CachedMessage, error) {
+	if limit <= 0 {
+		limit = 100
+	}
 	rows, err := r.db.Query(`SELECT
 		public_id, account_id, folder, uidvalidity, uid,
 		message_id, thread_key, subject, from_text, to_text, cc_text, bcc_text,
 		date, flags, has_attachments, snippet, body_text, visible_reason, content_hash,
 		first_loaded_at, last_loaded_or_verified_at
-	FROM messages WHERE account_id=? AND thread_key=? ORDER BY datetime(date) DESC, uid DESC, public_id DESC`,
-		accountID, threadKey)
+	FROM messages WHERE account_id=? AND thread_key=? ORDER BY datetime(date) DESC, uid DESC, public_id DESC LIMIT ? OFFSET ?`,
+		accountID, threadKey, limit, offset)
 	if err != nil {
 		return nil, err
 	}

@@ -173,8 +173,15 @@ func TestShowOverSocket(t *testing.T) {
 	if env.Status != api.StatusError {
 		t.Fatalf("show status = %q", env.Status)
 	}
-	if env.Error == nil || env.Error.Code != "not_found" {
-		t.Fatalf("expected not_found error, got %+v", env.Error)
+	if env.Error != nil {
+		t.Fatalf("expected structured refresh failure envelope, got error %+v", env.Error)
+	}
+	var show api.ShowResponse
+	if err := env.DecodeResult(&show); err != nil {
+		t.Fatalf("decode show response: %v", err)
+	}
+	if show.Refresh.RemoteOK {
+		t.Fatalf("show refresh.remote_ok = true, want false")
 	}
 }
 
@@ -187,8 +194,15 @@ func TestThreadAndContextOverSocket(t *testing.T) {
 	if threadEnv.Status != api.StatusError {
 		t.Fatalf("thread status = %q", threadEnv.Status)
 	}
-	if threadEnv.Error == nil || threadEnv.Error.Code != "not_found" {
-		t.Fatalf("expected not_found thread error, got %+v", threadEnv.Error)
+	if threadEnv.Error != nil {
+		t.Fatalf("expected structured thread refresh failure envelope, got error %+v", threadEnv.Error)
+	}
+	var thread api.ThreadResponse
+	if err := threadEnv.DecodeResult(&thread); err != nil {
+		t.Fatalf("decode thread response: %v", err)
+	}
+	if thread.Refresh.RemoteOK {
+		t.Fatalf("thread refresh.remote_ok = true, want false")
 	}
 
 	ctxEnv, err := c.Context(context.Background(), api.ContextRequest{ID: "absent-thread-id"})
@@ -198,7 +212,14 @@ func TestThreadAndContextOverSocket(t *testing.T) {
 	if ctxEnv.Status != api.StatusError {
 		t.Fatalf("context status = %q", ctxEnv.Status)
 	}
-	if ctxEnv.Error == nil || ctxEnv.Error.Code != "not_found" {
-		t.Fatalf("expected not_found context error, got %+v", ctxEnv.Error)
+	if ctxEnv.Error != nil {
+		t.Fatalf("expected structured context refresh failure envelope, got error %+v", ctxEnv.Error)
+	}
+	var contextResp api.ContextResponse
+	if err := ctxEnv.DecodeResult(&contextResp); err != nil {
+		t.Fatalf("decode context response: %v", err)
+	}
+	if contextResp.Refresh.RemoteOK {
+		t.Fatalf("context refresh.remote_ok = true, want false")
 	}
 }

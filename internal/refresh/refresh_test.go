@@ -642,7 +642,8 @@ func TestRefreshDoesNotRefetchCachedUIDBodiesWhenUIDNextIsUnchanged(t *testing.T
 		Policy:  config.PolicyFull,
 		Folders: []string{"INBOX"},
 	}}}}
-	now := time.Now().UTC()
+	old := time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC)
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 	repo := mustOpenRepoForRefresh(t)
 	if err := repo.UpsertMessage(mail.CachedMessage{
 		ID:                  mail.PublicID("acct", "INBOX", 123, 1),
@@ -655,13 +656,13 @@ func TestRefreshDoesNotRefetchCachedUIDBodiesWhenUIDNextIsUnchanged(t *testing.T
 		Subject:             "cached",
 		From:                "a@example.com",
 		To:                  "b@example.com",
-		Date:                now,
+		Date:                old,
 		Snippet:             "cached",
 		BodyText:            "cached body",
 		VisibleReason:       "policy_full",
 		ContentHash:         "h",
-		FirstLoadedAt:       now,
-		LastLoadedOrChecked: now,
+		FirstLoadedAt:       old,
+		LastLoadedOrChecked: old,
 	}); err != nil {
 		t.Fatalf("seed cached message: %v", err)
 	}
@@ -685,7 +686,10 @@ func TestRefreshDoesNotRefetchCachedUIDBodiesWhenUIDNextIsUnchanged(t *testing.T
 		}}},
 	})
 
-	if _, err := refresh.Refresh(context.Background(), cfg, repo, ad, refresh.RefreshOptions{MaxCandidates: 10}); err != nil {
+	if _, err := refresh.Refresh(context.Background(), cfg, repo, ad, refresh.RefreshOptions{
+		MaxCandidates: 10,
+		Now:           func() time.Time { return now },
+	}); err != nil {
 		t.Fatalf("Refresh: %v", err)
 	}
 	for _, call := range ad.CallsSnapshot() {
@@ -699,6 +703,40 @@ func TestRefreshDoesNotRefetchCachedUIDBodiesWhenUIDNextIsUnchanged(t *testing.T
 	}
 	if !ok || got.BodyText != "cached body" {
 		t.Fatalf("cached body = %q, found=%v; want existing cached body", got.BodyText, ok)
+	}
+	if !got.LastLoadedOrChecked.Equal(now) {
+		t.Fatalf("LastLoadedOrChecked = %v, want non-HMS verification time %v", got.LastLoadedOrChecked, now)
+	}
+}
+
+func TestRefreshReturnsLocalCacheErrorsInsteadOfRemoteWarnings(t *testing.T) {
+	cfg := &config.Config{Mail: config.Mail{Accounts: []config.Account{{
+		ID:       "acct",
+		Email:    "acct@example.com",
+		Host:     "imap.example.com",
+		Port:     993,
+		TLS:      boolPtr(true),
+		Username: "acct@example.com",
+		PasswordRef: config.PasswordRef{
+			Source:   config.PasswordSourceFile,
+			Provider: config.PasswordProviderLocal,
+			ID:       "/ksuite-mail/acct/password",
+		},
+		Policy:  config.PolicyFull,
+		Folders: []string{"INBOX"},
+	}}}}
+	repo := mustOpenRepoForRefresh(t)
+	if err := repo.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	ad := mailfake.NewAdapter(map[string]map[string][]mailfake.Message{"acct": {"INBOX": {}}})
+
+	res, err := refresh.Refresh(context.Background(), cfg, repo, ad, refresh.RefreshOptions{})
+	if err == nil {
+		t.Fatalf("Refresh err = nil, want local cache error")
+	}
+	if len(res.Warnings) != 0 || res.Partial {
+		t.Fatalf("refresh result = %+v, want no remote warning envelope for local cache error", res)
 	}
 }
 

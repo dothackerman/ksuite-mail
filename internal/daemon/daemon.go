@@ -263,6 +263,9 @@ func (s *Server) handleShow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !found {
+		if s.writeRefreshMiss(w, api.ShowResponse{Refresh: refreshRes.Meta}, refreshRes) {
+			return
+		}
 		s.writeError(w, http.StatusNotFound, "not_found", "message not found")
 		return
 	}
@@ -323,6 +326,9 @@ func (s *Server) handleThread(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !found {
+		if s.writeRefreshMiss(w, api.ThreadResponse{Refresh: refreshRes.Meta}, refreshRes) {
+			return
+		}
 		s.writeError(w, http.StatusNotFound, "not_found", "message not found")
 		return
 	}
@@ -330,25 +336,16 @@ func (s *Server) handleThread(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusNotFound, "not_found", "message not found")
 		return
 	}
-	messages, err := repo.ThreadMessages(seed.AccountID, seed.ThreadKey)
-	if err != nil {
-		s.writeError(w, http.StatusInternalServerError, "internal_error", "could not read thread")
-		return
-	}
-
 	maxMessages := req.MaxMessages
 	if maxMessages <= 0 {
 		maxMessages = defaultLimit
 	}
-	results := make([]api.MessageSummary, 0, min(len(messages), maxMessages))
-	for _, msg := range messages {
-		if !cachedMessageAllowed(cfg, msg) {
-			continue
-		}
-		results = append(results, toMessageSummary(msg))
-		if len(results) >= maxMessages {
-			break
-		}
+	results, err := visibleThreadMessages(cfg, func(batchLimit, batchOffset int) ([]mail.CachedMessage, error) {
+		return repo.ThreadMessages(seed.AccountID, seed.ThreadKey, batchLimit, batchOffset)
+	}, maxMessages)
+	if err != nil {
+		s.writeError(w, http.StatusInternalServerError, "internal_error", "could not read thread")
+		return
 	}
 
 	resp := api.ThreadResponse{
@@ -388,6 +385,9 @@ func (s *Server) handleContext(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !found {
+		if s.writeRefreshMiss(w, api.ContextResponse{Refresh: refreshRes.Meta}, refreshRes) {
+			return
+		}
 		s.writeError(w, http.StatusNotFound, "not_found", "message not found")
 		return
 	}
@@ -398,19 +398,16 @@ func (s *Server) handleContext(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	msgs, err := repo.ThreadMessages(seed.AccountID, seed.ThreadKey)
-	if err != nil {
-		s.writeError(w, http.StatusInternalServerError, "internal_error", "could not read thread")
-		return
-	}
-	if len(msgs) == 0 {
-		s.writeError(w, http.StatusNotFound, "not_found", "thread is empty")
-		return
-	}
-
 	budget := req.Budget
 	if budget <= 0 {
 		budget = defaultBudget
+	}
+	msgs, err := boundedThreadContext(cfg, seed.ID, budget, func(batchLimit, batchOffset int) ([]mail.CachedMessage, error) {
+		return repo.ThreadMessages(seed.AccountID, seed.ThreadKey, batchLimit, batchOffset)
+	})
+	if err != nil {
+		s.writeError(w, http.StatusInternalServerError, "internal_error", "could not read thread")
+		return
 	}
 	timeline := make([]api.MessageSummary, 0, len(msgs))
 	var used int
@@ -439,7 +436,11 @@ func (s *Server) handleContext(w http.ResponseWriter, r *http.Request) {
 		if acct.Policy == config.PolicyDomain {
 			seedBody = stripEmbeddedReplies(seedBody)
 		}
-		seedBody = truncateText(seedBody, min(defaultContextMax, remaining))
+		if remaining > 0 {
+			seedBody = truncateText(seedBody, min(defaultContextMax, remaining))
+		} else {
+			seedBody = ""
+		}
 	}
 	resp := api.ContextResponse{
 		Seed:          toMessageDetail(seed, seedBody, true),
@@ -505,6 +506,73 @@ func visibleMessagePage(
 	}
 }
 
+func visibleThreadMessages(
+	cfg *config.Config,
+	load func(limit, offset int) ([]mail.CachedMessage, error),
+	limit int,
+) ([]api.MessageSummary, error) {
+	if limit <= 0 {
+		limit = defaultLimit
+	}
+	batchSize := max(defaultLimit, limit)
+	results := make([]api.MessageSummary, 0, limit)
+	rawOffset := 0
+	for {
+		messages, err := load(batchSize, rawOffset)
+		if err != nil {
+			return nil, err
+		}
+		for _, msg := range messages {
+			if !cachedMessageAllowed(cfg, msg) {
+				continue
+			}
+			results = append(results, toMessageSummary(msg))
+			if len(results) >= limit {
+				return results, nil
+			}
+		}
+		if len(messages) < batchSize {
+			return results, nil
+		}
+		rawOffset += len(messages)
+	}
+}
+
+func boundedThreadContext(
+	cfg *config.Config,
+	seedID string,
+	budget int,
+	load func(limit, offset int) ([]mail.CachedMessage, error),
+) ([]mail.CachedMessage, error) {
+	if budget <= 0 {
+		budget = defaultBudget
+	}
+	batchSize := defaultLimit
+	out := make([]mail.CachedMessage, 0, defaultLimit)
+	rawOffset := 0
+	used := 0
+	for {
+		messages, err := load(batchSize, rawOffset)
+		if err != nil {
+			return nil, err
+		}
+		for _, msg := range messages {
+			if !cachedMessageAllowed(cfg, msg) || msg.ID == seedID {
+				continue
+			}
+			if used+len(msg.Snippet) > budget {
+				return out, nil
+			}
+			used += len(msg.Snippet)
+			out = append(out, msg)
+		}
+		if len(messages) < batchSize {
+			return out, nil
+		}
+		rawOffset += len(messages)
+	}
+}
+
 func normalizeReadPage(requestedLimit, requestedOffset int) (int, int, bool) {
 	limit := withDefault(0, requestedLimit, defaultLimit)
 	offset := max(0, requestedOffset)
@@ -557,12 +625,21 @@ func (s *Server) refreshAndLoad(ctx context.Context, minCandidates int) (*config
 	res, err := refresh.Refresh(ctx, cfg, repo, src, refresh.RefreshOptions{
 		Now:           time.Now,
 		PreviewBytes:  refresh.DefaultPreviewBytes,
-		MaxCandidates: max(withDefault(cfg.Mail.DefaultLimit, 0, defaultLimit), minCandidates),
+		MaxCandidates: min(max(effectiveReadLimit(cfg.Mail.DefaultLimit, 0), minCandidates), maxReadWindow),
 	})
 	if err != nil {
 		return nil, nil, refresh.Result{}, err
 	}
 	return cfg, repo, res, nil
+}
+
+func (s *Server) writeRefreshMiss(w http.ResponseWriter, payload any, refreshRes refresh.Result) bool {
+	status := api.ReadStatus(refreshRes.Meta, refreshRes.Partial, false)
+	if status != api.StatusError {
+		return false
+	}
+	s.writeReadOK(w, status, payload, refreshRes.Warnings)
+	return true
 }
 
 func (s *Server) sourceForConfig(ctx context.Context, cfg *config.Config) (source, error) {

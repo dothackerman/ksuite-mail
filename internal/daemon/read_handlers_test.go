@@ -484,6 +484,93 @@ func TestReadContextCapsSeedBodyByBudget(t *testing.T) {
 	}
 }
 
+func TestReadContextPreservesZeroRemainingBudget(t *testing.T) {
+	adapter := mailfake.NewAdapter(map[string]map[string][]mailfake.Message{
+		"acct": {
+			"INBOX": {
+				{
+					UID: 10,
+					Envelope: mail.MessageEnvelope{
+						UID:       10,
+						Subject:   "newer context",
+						From:      "alice@example.com",
+						ThreadKey: "thread-budget-zero",
+						Snippet:   "12345",
+						Date:      time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC),
+					},
+					Body:            "newer",
+					VisibleByPolicy: true,
+				},
+				{
+					UID: 9,
+					Envelope: mail.MessageEnvelope{
+						UID:       9,
+						Subject:   "seed context",
+						From:      "alice@example.com",
+						ThreadKey: "thread-budget-zero",
+						Snippet:   "seed",
+						Date:      time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+					},
+					Body:            strings.Repeat("seed-body", 20),
+					VisibleByPolicy: true,
+				},
+			},
+			"Sent": {},
+		},
+	})
+	ts := newLocalHTTPServer(t, deploymentWithSource(t, validDomainConfig, adapter))
+	defer ts.Close()
+	listRes := postJSON(t, ts.Client(), ts.URL+"/v1/list", map[string]any{"account": "acct", "folder": "INBOX", "limit": 2})
+	var listEnv api.Envelope
+	if err := json.NewDecoder(listRes.Body).Decode(&listEnv); err != nil {
+		t.Fatalf("decode list: %v", err)
+	}
+	_ = listRes.Body.Close()
+	var list api.ListResponse
+	if err := listEnv.DecodeResult(&list); err != nil || len(list.Results) != 2 {
+		t.Fatalf("decode list payload: %v len=%d", err, len(list.Results))
+	}
+
+	ctxRes := postJSON(t, ts.Client(), ts.URL+"/v1/context", map[string]any{"id": list.Results[1].ID, "budget": 5})
+	defer func() { _ = ctxRes.Body.Close() }()
+	env := decodeEnvelopeBody(t, ctxRes.Body)
+	var got api.ContextResponse
+	if err := env.DecodeResult(&got); err != nil {
+		t.Fatalf("decode context: %v", err)
+	}
+	if len(got.Timeline) != 1 || got.Timeline[0].Snippet != "12345" {
+		t.Fatalf("timeline = %#v, want exact-budget prior snippet", got.Timeline)
+	}
+	if got.Seed.BodyText != "" {
+		t.Fatalf("seed body = %q, want empty when remaining budget is zero", got.Seed.BodyText)
+	}
+}
+
+func TestReadShowMissingIDReturnsStructuredRefreshFailure(t *testing.T) {
+	ts := newLocalHTTPServer(t, deploymentWithSource(t, validDomainConfig, nil))
+	defer ts.Close()
+
+	res := postJSON(t, ts.Client(), ts.URL+"/v1/show", map[string]any{"id": "missing", "preview": true})
+	defer func() { _ = res.Body.Close() }()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("status code = %d, want structured 200 envelope", res.StatusCode)
+	}
+	env := decodeEnvelopeBody(t, res.Body)
+	if env.Status != api.StatusError {
+		t.Fatalf("status = %q, want %q", env.Status, api.StatusError)
+	}
+	if len(env.Warnings) != 1 || env.Warnings[0].Code != "remote_source_unavailable" {
+		t.Fatalf("warnings = %#v", env.Warnings)
+	}
+	var got api.ShowResponse
+	if err := env.DecodeResult(&got); err != nil {
+		t.Fatalf("decode show response: %v", err)
+	}
+	if got.Refresh.Attempted || got.Refresh.RemoteOK {
+		t.Fatalf("refresh = %+v, want failed refresh metadata", got.Refresh)
+	}
+}
+
 func TestReadShowTruncatesBodyByRunes(t *testing.T) {
 	adapter := mailfake.NewAdapter(map[string]map[string][]mailfake.Message{
 		"acct": {
@@ -579,6 +666,44 @@ func TestReadListRejectsOversizedRefreshWindow(t *testing.T) {
 	}
 	if calls := adapter.CallsSnapshot(); len(calls) != 0 {
 		t.Fatalf("remote refresh ran for oversized request: %+v", calls)
+	}
+}
+
+func TestReadListClampsConfiguredRefreshFloor(t *testing.T) {
+	cfg := strings.Replace(validDomainConfig, "default_limit = 50", "default_limit = 1000000", 1)
+	messages := make([]mailfake.Message, 1001)
+	for i := range messages {
+		uid := mail.UID(i + 1)
+		messages[i] = mailfake.Message{
+			UID: uid,
+			Envelope: mail.MessageEnvelope{
+				UID:       uid,
+				Subject:   "bulk",
+				From:      "alice@example.com",
+				ThreadKey: "bulk",
+				Date:      time.Date(2026, 1, 1, 0, i%60, 0, 0, time.UTC),
+			},
+			Body:            "bulk",
+			VisibleByPolicy: true,
+		}
+	}
+	adapter := mailfake.NewAdapter(map[string]map[string][]mailfake.Message{"acct": {"INBOX": messages, "Sent": {}}})
+	ts := newLocalHTTPServer(t, deploymentWithSource(t, cfg, adapter))
+	defer ts.Close()
+
+	res := postJSON(t, ts.Client(), ts.URL+"/v1/list", map[string]any{"account": "acct", "folder": "INBOX"})
+	defer func() { _ = res.Body.Close() }()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", res.StatusCode)
+	}
+	previewCalls := 0
+	for _, call := range adapter.CallsSnapshot() {
+		if call.Method == "preview" && call.Target == "acct@INBOX" {
+			previewCalls++
+		}
+	}
+	if previewCalls != maxReadWindow {
+		t.Fatalf("preview calls = %d, want clamp at maxReadWindow %d", previewCalls, maxReadWindow)
 	}
 }
 
