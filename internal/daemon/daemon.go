@@ -361,10 +361,14 @@ func (s *Server) handleThread(w http.ResponseWriter, r *http.Request) {
 		}
 		return repo.ThreadMessages(seed.AccountID, seed.ThreadKey, batchLimit, batchOffset)
 	}
-	results, err := visibleThreadMessages(cfg, loadThread, maxMessages)
+	threadMessages, err := visibleThreadMessages(cfg, loadThread, maxMessages)
 	if err != nil {
 		s.writeError(w, http.StatusInternalServerError, "internal_error", "could not read thread")
 		return
+	}
+	results := make([]api.MessageSummary, 0, len(threadMessages))
+	for _, msg := range threadMessages {
+		results = append(results, toMessageSummary(msg))
 	}
 
 	resp := api.ThreadResponse{
@@ -372,7 +376,7 @@ func (s *Server) handleThread(w http.ResponseWriter, r *http.Request) {
 		Messages:  results,
 		Refresh:   refreshRes.Meta,
 	}
-	status := readStatusForScope(refreshRes, seed.AccountID, seed.Folder, len(results) > 0)
+	status := readStatusForMessages(refreshRes, threadMessages)
 	s.writeReadOK(w, status, resp, refreshRes.Warnings)
 }
 
@@ -528,12 +532,12 @@ func visibleThreadMessages(
 	cfg *config.Config,
 	load func(limit, offset int) ([]mail.CachedMessage, error),
 	limit int,
-) ([]api.MessageSummary, error) {
+) ([]mail.CachedMessage, error) {
 	if limit <= 0 {
 		limit = defaultLimit
 	}
 	batchSize := max(defaultLimit, limit)
-	results := make([]api.MessageSummary, 0, limit)
+	results := make([]mail.CachedMessage, 0, limit)
 	rawOffset := 0
 	for rawOffset < maxReadWindow {
 		remainingWindow := maxReadWindow - rawOffset
@@ -546,7 +550,7 @@ func visibleThreadMessages(
 			if !cachedMessageAllowed(cfg, msg) {
 				continue
 			}
-			results = append(results, toMessageSummary(msg))
+			results = append(results, msg)
 			if len(results) >= limit {
 				return results, nil
 			}
@@ -640,6 +644,20 @@ func readStatusForScope(refreshRes refresh.Result, requestedAccount, requestedFo
 	meta := refreshRes.Meta
 	meta.RemoteOK = true
 	return api.ReadStatus(meta, false, localFound)
+}
+
+func readStatusForMessages(refreshRes refresh.Result, messages []mail.CachedMessage) string {
+	if len(messages) == 0 {
+		return readStatusForScope(refreshRes, "", "", false)
+	}
+	for _, msg := range messages {
+		if refreshAffectsScope(refreshRes.Warnings, msg.AccountID, msg.Folder) {
+			return api.ReadStatus(refreshRes.Meta, refreshRes.Partial, true)
+		}
+	}
+	meta := refreshRes.Meta
+	meta.RemoteOK = true
+	return api.ReadStatus(meta, false, true)
 }
 
 func refreshAffectsScope(warnings []refresh.Warning, requestedAccount, requestedFolder string) bool {

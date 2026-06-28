@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -17,6 +18,8 @@ import (
 	"github.com/dothackerman/ksuite-mail/internal/layout"
 	"github.com/dothackerman/ksuite-mail/internal/mail"
 )
+
+var writeMu sync.Mutex
 
 // RefreshMeta carries command-level refresh metadata.
 type RefreshMeta struct {
@@ -246,6 +249,9 @@ type fnScanner interface {
 
 // UpsertMessage writes a policy-approved message into both content and FTS tables.
 func (r *Repository) UpsertMessage(msg mail.CachedMessage) error {
+	writeMu.Lock()
+	defer writeMu.Unlock()
+
 	tx, err := r.db.Begin()
 	if err != nil {
 		return err
@@ -475,6 +481,9 @@ func (r *Repository) ListUIDsForFolder(accountID, folder string) ([]mail.UID, er
 // MarkFolderVerified refreshes TTL verification time for cached rows known to
 // be covered by a successful no-change folder refresh.
 func (r *Repository) MarkFolderVerified(accountID, folder string, uidvalidity uint64, checkedAt time.Time) error {
+	writeMu.Lock()
+	defer writeMu.Unlock()
+
 	verified := checkedAt.UTC().Format(time.RFC3339Nano)
 	_, err := r.db.Exec(`
 		UPDATE messages
@@ -490,6 +499,9 @@ func (r *Repository) MarkUIDsVerified(accountID, folder string, uidvalidity uint
 	if len(uids) == 0 {
 		return nil
 	}
+	writeMu.Lock()
+	defer writeMu.Unlock()
+
 	verified := checkedAt.UTC().Format(time.RFC3339Nano)
 	updated := r.now().UTC().Format(time.RFC3339Nano)
 	for uid := range uids {
@@ -506,6 +518,9 @@ func (r *Repository) MarkUIDsVerified(accountID, folder string, uidvalidity uint
 
 // DeleteByMessageRef removes one local row including its FTS entry.
 func (r *Repository) DeleteByMessageRef(ref MessageRef) error {
+	writeMu.Lock()
+	defer writeMu.Unlock()
+
 	tx, err := r.db.Begin()
 	if err != nil {
 		return err
@@ -531,6 +546,9 @@ func (r *Repository) DeleteByMessageRef(ref MessageRef) error {
 
 // DeleteByFolder deletes all rows in an account/folder and matching FTS rows.
 func (r *Repository) DeleteByFolder(accountID, folder string) error {
+	writeMu.Lock()
+	defer writeMu.Unlock()
+
 	tx, err := r.db.Begin()
 	if err != nil {
 		return err
@@ -616,6 +634,9 @@ func (r *Repository) DeleteMissingByUIDSetInRange(accountID, folder string, keep
 
 // UpsertFolderState records IMAP sync metadata.
 func (r *Repository) UpsertFolderState(fs FolderState) error {
+	writeMu.Lock()
+	defer writeMu.Unlock()
+
 	now := r.now().UTC().Format(time.RFC3339Nano)
 	if fs.LastRefreshAttempted == nil {
 		t := r.now()
@@ -688,6 +709,9 @@ func (r *Repository) FolderState(accountID, folder string) (*FolderState, error)
 
 // DeleteAll removes all cached rows and metadata.
 func (r *Repository) DeleteAll() error {
+	writeMu.Lock()
+	defer writeMu.Unlock()
+
 	if _, err := r.db.Exec(`DELETE FROM messages`); err != nil {
 		return err
 	}
@@ -728,6 +752,9 @@ func (r *Repository) CleanupExpired(ttl time.Duration) error {
 	if len(expired) == 0 {
 		return nil
 	}
+	writeMu.Lock()
+	defer writeMu.Unlock()
+
 	sort.Slice(expired, func(i, j int) bool { return expired[i].id < expired[j].id })
 	tx, err := r.db.Begin()
 	if err != nil {

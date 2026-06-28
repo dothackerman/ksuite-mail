@@ -1,8 +1,10 @@
 package cache
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -62,6 +64,60 @@ func TestRepositoryCanCreateAndQueryFTS5(t *testing.T) {
 	}
 	if len(results) != 1 {
 		t.Fatalf("results = %d, want 1", len(results))
+	}
+}
+
+func TestRepositorySerializesWritesAcrossConnections(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "mail.db")
+	repoA := mustOpenRepo(t, dbPath)
+	defer func() { _ = repoA.Close() }()
+	repoB := mustOpenRepo(t, dbPath)
+	defer func() { _ = repoB.Close() }()
+
+	now := time.Now().UTC().Truncate(time.Second)
+	repos := []*Repository{repoA, repoB}
+	var wg sync.WaitGroup
+	errs := make(chan error, 40)
+	for i := 0; i < 40; i++ {
+		i := i
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			uid := mail.UID(i + 1)
+			errs <- repos[i%len(repos)].UpsertMessage(mail.CachedMessage{
+				ID:                  fmt.Sprintf("msg_concurrent_%02d", i),
+				AccountID:           "acct",
+				Folder:              "INBOX",
+				UIDVALIDITY:         10,
+				UID:                 uid,
+				MessageID:           fmt.Sprintf("<msg-%02d>", i),
+				ThreadKey:           "thread-concurrent",
+				Subject:             "concurrent",
+				From:                "alice@example.com",
+				To:                  "bob@example.com",
+				Date:                now.Add(time.Duration(i) * time.Second),
+				Snippet:             "body",
+				BodyText:            "body",
+				VisibleReason:       "policy_full",
+				ContentHash:         fmt.Sprintf("hash-%02d", i),
+				FirstLoadedAt:       now,
+				LastLoadedOrChecked: now,
+			})
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent write: %v", err)
+		}
+	}
+	msgs, err := repoA.ListMessages(QueryFilter{AccountID: "acct", Folder: "INBOX", Limit: 100})
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	if len(msgs) != 40 {
+		t.Fatalf("messages = %d, want 40", len(msgs))
 	}
 }
 

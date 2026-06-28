@@ -558,6 +558,52 @@ func TestReadListWarningPropagatesOnRefreshFailure(t *testing.T) {
 	}
 }
 
+func TestReadThreadMarksStaleWhenAnyReturnedFolderFailed(t *testing.T) {
+	adapter := mailfake.NewAdapter(map[string]map[string][]mailfake.Message{
+		"acct": {
+			"INBOX": {
+				{
+					UID: 1,
+					Envelope: mail.MessageEnvelope{
+						UID:       1,
+						Subject:   "inbox",
+						From:      "alice@example.com",
+						Snippet:   "inbox",
+						ThreadKey: "cross-folder-thread",
+					},
+					Body: "inbox",
+				},
+			},
+			"Sent": {},
+		},
+	})
+	adapter.SetFailure("select", "acct", "Sent", "", fmt.Errorf("sent folder down"))
+	opts := deploymentWithSource(t, validFullConfig, adapter)
+	now := time.Now().UTC()
+	sent := cachedForDaemon(mail.PublicID("acct", "Sent", 123, 2), "cross-folder-thread", "alice@example.com", now.Add(-time.Hour), 2)
+	sent.Folder = "Sent"
+	seedDaemonCache(t, opts.StateDir, sent)
+	ts := newLocalHTTPServer(t, opts)
+	defer ts.Close()
+
+	res := postJSON(t, ts.Client(), ts.URL+"/v1/thread", map[string]any{
+		"id":           mail.PublicID("acct", "INBOX", 123, 1),
+		"max_messages": 10,
+	})
+	defer func() { _ = res.Body.Close() }()
+	env := decodeEnvelopeBody(t, res.Body)
+	if env.Status != api.StatusOKStale {
+		t.Fatalf("status = %q, want %q", env.Status, api.StatusOKStale)
+	}
+	var got api.ThreadResponse
+	if err := env.DecodeResult(&got); err != nil {
+		t.Fatalf("decode thread response: %v", err)
+	}
+	if len(got.Messages) != 2 {
+		t.Fatalf("thread messages = %#v, want refreshed INBOX and cached Sent rows", got.Messages)
+	}
+}
+
 func TestReadSearchRequiresQuery(t *testing.T) {
 	adapter := mailfake.NewAdapter(map[string]map[string][]mailfake.Message{
 		"acct": {

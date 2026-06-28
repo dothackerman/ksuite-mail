@@ -54,6 +54,13 @@ type source interface {
 	FetchBodyPreview(ctx context.Context, acct config.Account, folder string, uid mail.UID, maxBytes int) (string, error)
 }
 
+type candidateDiscovery struct {
+	UIDs           []mail.UID
+	Scope          mail.UIDRange
+	Complete       bool
+	UseScopeBounds bool
+}
+
 // RefreshOptions configures the coordinator.
 type RefreshOptions struct {
 	Now           func() time.Time
@@ -145,6 +152,18 @@ func refreshFolder(
 	}
 	fingerprint := policyFingerprint(account)
 
+	if state == nil {
+		localUIDs, err := ctxRepo.ListUIDsForFolder(account.ID, folder)
+		if err != nil {
+			return localCacheError{err: err}
+		}
+		if len(localUIDs) > 0 {
+			if err := ctxRepo.DeleteByFolder(account.ID, folder); err != nil {
+				return localCacheError{err: err}
+			}
+		}
+	}
+
 	// UIDVALIDITY changed => clear the local folder and restart from scratch.
 	if state != nil && state.UIDVALIDITY != remote.UIDVALIDITY {
 		if err := ctxRepo.DeleteByFolder(account.ID, folder); err != nil {
@@ -175,10 +194,11 @@ func refreshFolder(
 		return nil
 	}
 
-	candidates, complete, err := discoverCandidates(ctx, src, account, folder, remote.UIDNEXT, maxCandidates)
+	discovered, err := discoverCandidates(ctx, src, account, folder, remote.UIDNEXT, maxCandidates)
 	if err != nil {
 		return err
 	}
+	candidates := discovered.UIDs
 	keep := cache.UIDSet{}
 	cachedObserved := cache.UIDSet{}
 	fetchUIDs := candidates
@@ -244,7 +264,7 @@ func refreshFolder(
 		}
 	}
 
-	if complete {
+	if discovered.Complete {
 		if err := ctxRepo.DeleteMissingByUIDSet(account.ID, folder, keep); err != nil {
 			return localCacheError{err: err}
 		}
@@ -255,7 +275,7 @@ func refreshFolder(
 		if err := ctxRepo.MarkUIDsVerified(account.ID, folder, remote.UIDVALIDITY, cachedObserved, now); err != nil {
 			return localCacheError{err: err}
 		}
-		minUID, maxUID := uidBounds(candidates)
+		minUID, maxUID := observedScopeBounds(discovered, candidates)
 		if err := ctxRepo.DeleteMissingByUIDSetInRange(account.ID, folder, keep, minUID, maxUID); err != nil {
 			return localCacheError{err: err}
 		}
@@ -271,7 +291,7 @@ func refreshFolder(
 		}
 	}
 	highestModSeq := remote.HighestModSeq
-	if !complete {
+	if !discovered.Complete {
 		highestModSeq = 0
 	}
 	if err := ctxRepo.UpsertFolderState(cache.FolderState{
@@ -342,6 +362,14 @@ func uidBounds(uids []mail.UID) (mail.UID, mail.UID) {
 	return minUID, maxUID
 }
 
+func observedScopeBounds(discovered candidateDiscovery, fallback []mail.UID) (mail.UID, mail.UID) {
+	if discovered.UseScopeBounds && discovered.Scope.Min > 0 && discovered.Scope.Max > 0 {
+		scope := discovered.Scope
+		return mail.UID(scope.Min), mail.UID(scope.Max)
+	}
+	return uidBounds(fallback)
+}
+
 func discoverCandidates(
 	ctx context.Context,
 	src source,
@@ -349,7 +377,7 @@ func discoverCandidates(
 	folder string,
 	uidNext uint64,
 	maxCandidates int,
-) ([]mail.UID, bool, error) {
+) (candidateDiscovery, error) {
 	scope := mail.UIDRange{}
 	if uidNext > 0 {
 		scope.Max = uidNext
@@ -363,12 +391,17 @@ func discoverCandidates(
 	if account.Policy != config.PolicyDomain {
 		uids, err := src.ListUIDs(ctx, *account, folder, scope)
 		if err != nil {
-			return nil, false, err
+			return candidateDiscovery{}, err
 		}
 		if maxCandidates > 0 && len(uids) > maxCandidates {
-			return uids[len(uids)-maxCandidates:], false, nil
+			return candidateDiscovery{
+				UIDs:           uids[len(uids)-maxCandidates:],
+				Scope:          scope,
+				Complete:       false,
+				UseScopeBounds: !completeScope,
+			}, nil
 		}
-		return uids, completeScope, nil
+		return candidateDiscovery{UIDs: uids, Scope: scope, Complete: completeScope, UseScopeBounds: !completeScope}, nil
 	}
 
 	var out []mail.UID
@@ -381,16 +414,21 @@ func discoverCandidates(
 			domain = strings.ToLower(domain)
 			uids, err := src.SearchAllowed(ctx, *account, folder, header, domain, scope)
 			if err != nil {
-				return nil, false, err
+				return candidateDiscovery{}, err
 			}
 			out = append(out, uids...)
 		}
 	}
 	out = dedupeUIDs(out)
 	if maxCandidates > 0 && len(out) > maxCandidates {
-		return out[len(out)-maxCandidates:], false, nil
+		return candidateDiscovery{
+			UIDs:           out[len(out)-maxCandidates:],
+			Scope:          scope,
+			Complete:       false,
+			UseScopeBounds: !completeScope,
+		}, nil
 	}
-	return out, completeScope, nil
+	return candidateDiscovery{UIDs: out, Scope: scope, Complete: completeScope, UseScopeBounds: !completeScope}, nil
 }
 
 func lockRefreshFolder(accountID, folder string) func() {
