@@ -14,6 +14,8 @@ import (
 	"github.com/dothackerman/ksuite-mail/internal/udsclient"
 )
 
+const readCommandTimeout = 20 * time.Second
+
 func runInbox(args []string) int {
 	fs := flag.NewFlagSet("inbox", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
@@ -236,10 +238,10 @@ func readValidationError(message string) int {
 }
 
 func runReadCommand(socket string, fn func(context.Context, *udsclient.Client) (api.Envelope, error)) int {
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), readCommandTimeout)
 	defer cancel()
 
-	env, err := fn(ctx, udsclient.New(socket))
+	env, err := fn(ctx, udsclient.NewWithTimeout(socket, readCommandTimeout))
 	if err != nil {
 		if errors.Is(err, udsclient.ErrUnreachable) {
 			emitJSON(api.Err("daemon_unreachable", "could not reach ksuite-maild on its socket; is the service running?"))
@@ -254,9 +256,9 @@ func runReadCommand(socket string, fn func(context.Context, *udsclient.Client) (
 
 func readStatusExitCode(status string) int {
 	switch status {
-	case api.StatusOK:
+	case api.StatusOK, api.StatusOKStale:
 		return 0
-	case api.StatusOKStale, api.StatusPartial, api.StatusError:
+	case api.StatusPartial, api.StatusError:
 		return 1
 	default:
 		return 1

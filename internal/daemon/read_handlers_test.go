@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"testing"
@@ -37,6 +38,21 @@ username = "acct@example.com"
 password_ref = { source = "file", provider = "local", id = "/ksuite-mail/acct/password" }
 policy = "domain"
 domains = ["example.com"]
+folders = ["INBOX", "Sent"]
+`
+
+const validFullConfig = `[mail]
+default_limit = 50
+
+[[mail.accounts]]
+id = "acct"
+email = "acct@example.com"
+host = "imap.example.com"
+port = 993
+tls = true
+username = "acct@example.com"
+password_ref = { source = "file", provider = "local", id = "/ksuite-mail/acct/password" }
+policy = "full"
 folders = ["INBOX", "Sent"]
 `
 
@@ -234,6 +250,53 @@ func TestReadShowOmitsReplyChainForDomainAccount(t *testing.T) {
 	}
 	if strings.Contains(show.Result.BodyText, "On Tuesday") {
 		t.Fatalf("reply boundary text leaked: %q", show.Result.BodyText)
+	}
+}
+
+func TestReadShowOmitsReplyChainForFullAccountByDefault(t *testing.T) {
+	adapter := mailfake.NewAdapter(map[string]map[string][]mailfake.Message{
+		"acct": {
+			"INBOX": {
+				{
+					UID: 3,
+					Envelope: mail.MessageEnvelope{
+						UID:       3,
+						Subject:   "full reply chain",
+						From:      "alice@other.example",
+						To:        "bob@example.com",
+						Snippet:   "full reply chain",
+						ThreadKey: "thread",
+					},
+					Body:            "Current text\nOn Tuesday, reply wrote:\n> quoted text",
+					VisibleByPolicy: true,
+				},
+			},
+			"Sent": {},
+		},
+	})
+	ts := newLocalHTTPServer(t, deploymentWithSource(t, validFullConfig, adapter))
+	defer ts.Close()
+
+	listRes := postJSON(t, ts.Client(), ts.URL+"/v1/list", map[string]any{"account": "acct", "folder": "INBOX"})
+	var listEnv api.Envelope
+	if err := json.NewDecoder(listRes.Body).Decode(&listEnv); err != nil {
+		t.Fatalf("decode list: %v", err)
+	}
+	_ = listRes.Body.Close()
+	var list api.ListResponse
+	if err := listEnv.DecodeResult(&list); err != nil || len(list.Results) != 1 {
+		t.Fatalf("list response decode: %v len=%d", err, len(list.Results))
+	}
+
+	showRes := postJSON(t, ts.Client(), ts.URL+"/v1/show", map[string]any{"id": list.Results[0].ID, "preview": true})
+	defer func() { _ = showRes.Body.Close() }()
+	showEnv := decodeEnvelopeBody(t, showRes.Body)
+	var show api.ShowResponse
+	if err := showEnv.DecodeResult(&show); err != nil {
+		t.Fatalf("decode show payload: %v", err)
+	}
+	if strings.Contains(show.Result.BodyText, "On Tuesday") {
+		t.Fatalf("reply boundary text leaked for full account: %q", show.Result.BodyText)
 	}
 }
 
@@ -864,6 +927,52 @@ func TestReadThreadAppliesLimitAfterPolicy(t *testing.T) {
 	}
 }
 
+func TestReadThreadWithEmptyThreadKeyReturnsOnlySeedMessage(t *testing.T) {
+	adapter := mailfake.NewAdapter(map[string]map[string][]mailfake.Message{"acct": {"INBOX": {}, "Sent": {}}})
+	adapter.SetFailure("select", "acct", "INBOX", "", fmt.Errorf("remote down"))
+	opts := deploymentWithSource(t, validFullConfig, adapter)
+	now := time.Now().UTC()
+	seedDaemonCache(t, opts.StateDir,
+		cachedForDaemon("msg_seed_empty_thread", "", "alice@example.com", now, 1),
+		cachedForDaemon("msg_other_empty_thread", "", "carol@example.com", now.Add(-time.Hour), 2),
+	)
+	ts := newLocalHTTPServer(t, opts)
+	defer ts.Close()
+
+	res := postJSON(t, ts.Client(), ts.URL+"/v1/thread", map[string]any{"id": "msg_seed_empty_thread", "max_messages": 10})
+	defer func() { _ = res.Body.Close() }()
+	env := decodeEnvelopeBody(t, res.Body)
+	var got api.ThreadResponse
+	if err := env.DecodeResult(&got); err != nil {
+		t.Fatalf("decode thread response: %v", err)
+	}
+	if len(got.Messages) != 1 || got.Messages[0].ID != "msg_seed_empty_thread" {
+		t.Fatalf("thread messages = %#v, want only seed row for empty thread key", got.Messages)
+	}
+}
+
+func TestRefreshAndLoadClosesRepositoryOnPostOpenError(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("open fd counting uses /proc/self/fd")
+	}
+	opts := deploymentWithSource(t, validFullConfig, nil)
+	cachePath := filepath.Join(opts.StateDir, "mail.db")
+	opts.SourceFactory = func(context.Context, *config.Config) (source, error) {
+		return nil, fmt.Errorf("source setup failed")
+	}
+	s := New(opts)
+
+	before := countOpenPathFDs(t, cachePath)
+	_, _, _, err := s.refreshAndLoad(context.Background(), defaultLimit)
+	if err == nil {
+		t.Fatalf("refreshAndLoad error = nil, want source setup failure")
+	}
+	after := countOpenPathFDs(t, cachePath)
+	if after != before {
+		t.Fatalf("open cache fds after refreshAndLoad error = %d, want %d", after, before)
+	}
+}
+
 func seedDaemonCache(t *testing.T, stateDir string, messages ...mail.CachedMessage) {
 	t.Helper()
 	repo, err := cache.NewRepository(cache.DBOptions{Path: filepath.Join(stateDir, "mail.db")})
@@ -876,6 +985,25 @@ func seedDaemonCache(t *testing.T, stateDir string, messages ...mail.CachedMessa
 			t.Fatalf("UpsertMessage(%s): %v", msg.ID, err)
 		}
 	}
+}
+
+func countOpenPathFDs(t *testing.T, path string) int {
+	t.Helper()
+	entries, err := os.ReadDir("/proc/self/fd")
+	if err != nil {
+		t.Skipf("cannot read /proc/self/fd: %v", err)
+	}
+	count := 0
+	for _, entry := range entries {
+		target, err := os.Readlink(filepath.Join("/proc/self/fd", entry.Name()))
+		if err != nil {
+			continue
+		}
+		if target == path {
+			count++
+		}
+	}
+	return count
 }
 
 func cachedForDaemon(id, threadKey, from string, date time.Time, uid mail.UID) mail.CachedMessage {

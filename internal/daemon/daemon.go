@@ -281,9 +281,7 @@ func (s *Server) handleShow(w http.ResponseWriter, r *http.Request) {
 	includeBody := req.Preview
 	if includeBody {
 		body = msg.BodyText
-		if acct.Policy == config.PolicyDomain {
-			body = stripEmbeddedReplies(body)
-		}
+		body = stripEmbeddedReplies(body)
 		maxChars := req.MaxChars
 		if maxChars <= 0 {
 			maxChars = refresh.DefaultPreviewBytes
@@ -342,9 +340,16 @@ func (s *Server) handleThread(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusNotFound, "not_found", "message not found")
 		return
 	}
-	results, err := visibleThreadMessages(cfg, func(batchLimit, batchOffset int) ([]mail.CachedMessage, error) {
+	loadThread := func(batchLimit, batchOffset int) ([]mail.CachedMessage, error) {
+		if strings.TrimSpace(seed.ThreadKey) == "" {
+			if batchOffset > 0 {
+				return nil, nil
+			}
+			return []mail.CachedMessage{seed}, nil
+		}
 		return repo.ThreadMessages(seed.AccountID, seed.ThreadKey, batchLimit, batchOffset)
-	}, maxMessages)
+	}
+	results, err := visibleThreadMessages(cfg, loadThread, maxMessages)
 	if err != nil {
 		s.writeError(w, http.StatusInternalServerError, "internal_error", "could not read thread")
 		return
@@ -620,6 +625,12 @@ func (s *Server) refreshAndLoad(ctx context.Context, minCandidates int) (*config
 	if err != nil {
 		return nil, nil, refresh.Result{}, err
 	}
+	keepRepo := false
+	defer func() {
+		if !keepRepo {
+			_ = repo.Close()
+		}
+	}()
 	if err := cleanupExpired(repo, cfg); err != nil {
 		return nil, nil, refresh.Result{}, err
 	}
@@ -629,6 +640,7 @@ func (s *Server) refreshAndLoad(ctx context.Context, minCandidates int) (*config
 		return nil, nil, refresh.Result{}, err
 	}
 	if src == nil {
+		keepRepo = true
 		return cfg, repo, refresh.Result{
 			Meta: cache.RefreshMeta{
 				Attempted:               false,
@@ -651,6 +663,7 @@ func (s *Server) refreshAndLoad(ctx context.Context, minCandidates int) (*config
 	if err != nil {
 		return nil, nil, refresh.Result{}, err
 	}
+	keepRepo = true
 	return cfg, repo, res, nil
 }
 

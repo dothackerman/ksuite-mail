@@ -28,10 +28,16 @@ type Client struct {
 
 // New returns a client bound to the daemon socket at path.
 func New(socket string) *Client {
+	return NewWithTimeout(socket, 10*time.Second)
+}
+
+// NewWithTimeout returns a client bound to the daemon socket at path with a
+// request timeout chosen by the caller.
+func NewWithTimeout(socket string, timeout time.Duration) *Client {
 	return &Client{
 		socket: socket,
 		http: &http.Client{
-			Timeout: 10 * time.Second,
+			Timeout: timeout,
 			Transport: &http.Transport{
 				DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 					return (&net.Dialer{}).DialContext(ctx, "unix", socket)
@@ -39,6 +45,11 @@ func New(socket string) *Client {
 			},
 		},
 	}
+}
+
+// Timeout returns the HTTP request timeout configured for the client.
+func (c *Client) Timeout() time.Duration {
+	return c.http.Timeout
 }
 
 // Health calls GET /v1/health.

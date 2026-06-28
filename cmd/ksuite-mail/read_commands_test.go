@@ -11,8 +11,10 @@ import (
 	"path/filepath"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/dothackerman/ksuite-mail/internal/api"
+	"github.com/dothackerman/ksuite-mail/internal/udsclient"
 )
 
 func TestReadStatusExitCodeMapsStatuses(t *testing.T) {
@@ -22,7 +24,7 @@ func TestReadStatusExitCodeMapsStatuses(t *testing.T) {
 		expected int
 	}{
 		{in: "ok", expected: 0},
-		{in: "ok_stale", expected: 1},
+		{in: "ok_stale", expected: 0},
 		{in: "partial", expected: 1},
 		{in: "error", expected: 1},
 		{in: "other", expected: 1},
@@ -175,6 +177,16 @@ func TestReadCommandsAcceptDocumentedFlagsAndPositionals(t *testing.T) {
 			}
 			tc.assertReq(t, req.body)
 		})
+	}
+}
+
+func TestReadCommandClientTimeoutMatchesReadContext(t *testing.T) {
+	client := udsclient.NewWithTimeout("unused.sock", readCommandTimeout)
+	if got := client.Timeout(); got != readCommandTimeout {
+		t.Fatalf("read client timeout = %s, want %s", got, readCommandTimeout)
+	}
+	if readCommandTimeout < 20*time.Second {
+		t.Fatalf("read command timeout = %s, want at least 20s", readCommandTimeout)
 	}
 }
 
