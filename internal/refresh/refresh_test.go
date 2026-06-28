@@ -2,6 +2,7 @@ package refresh_test
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -464,6 +465,157 @@ func TestFullRefreshBoundsRemoteUIDListing(t *testing.T) {
 	}
 	if state == nil || state.HighestModSeq != 0 {
 		t.Fatalf("folder state = %+v, want incomplete marker after bounded listing", state)
+	}
+}
+
+func TestBoundedRefreshMarksObservedCachedUIDsVerified(t *testing.T) {
+	cfg := &config.Config{Mail: config.Mail{Accounts: []config.Account{{
+		ID:       "acct",
+		Email:    "acct@example.com",
+		Host:     "imap.example.com",
+		Port:     993,
+		TLS:      boolPtr(true),
+		Username: "acct@example.com",
+		PasswordRef: config.PasswordRef{
+			Source:   config.PasswordSourceFile,
+			Provider: config.PasswordProviderLocal,
+			ID:       "/ksuite-mail/acct/password",
+		},
+		Policy:  config.PolicyFull,
+		Folders: []string{"INBOX"},
+	}}}}
+	old := time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC)
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	repo := mustOpenRepoForRefresh(t)
+	if err := repo.UpsertMessage(mail.CachedMessage{
+		ID:                  mail.PublicID("acct", "INBOX", 123, 16),
+		AccountID:           "acct",
+		Folder:              "INBOX",
+		UIDVALIDITY:         123,
+		UID:                 16,
+		MessageID:           "<cached>",
+		ThreadKey:           "thread",
+		Subject:             "cached",
+		From:                "a@example.com",
+		To:                  "b@example.com",
+		Date:                old,
+		Snippet:             "cached",
+		BodyText:            "cached body",
+		VisibleReason:       "policy_full",
+		ContentHash:         "h",
+		FirstLoadedAt:       old,
+		LastLoadedOrChecked: old,
+	}); err != nil {
+		t.Fatalf("seed cached message: %v", err)
+	}
+	if err := repo.UpsertFolderState(cache.FolderState{
+		AccountID:         "acct",
+		Folder:            "INBOX",
+		UIDVALIDITY:       123,
+		UIDNEXT:           21,
+		HighestModSeq:     0,
+		LastSeenUID:       20,
+		PolicyFingerprint: "full:",
+	}); err != nil {
+		t.Fatalf("seed folder state: %v", err)
+	}
+	messages := make([]mailfake.Message, 20)
+	for i := range messages {
+		uid := mail.UID(i + 1)
+		messages[i] = mailfake.Message{
+			UID:             uid,
+			Envelope:        mail.MessageEnvelope{UID: uid, From: "alice@example.com", Subject: "bounded"},
+			Body:            "bounded",
+			VisibleByPolicy: true,
+		}
+	}
+	ad := mailfake.NewAdapter(map[string]map[string][]mailfake.Message{"acct": {"INBOX": messages}})
+
+	if _, err := refresh.Refresh(context.Background(), cfg, repo, ad, refresh.RefreshOptions{
+		MaxCandidates: 5,
+		Now:           func() time.Time { return now },
+	}); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	got, ok, err := repo.GetByPublicID(mail.PublicID("acct", "INBOX", 123, 16))
+	if err != nil {
+		t.Fatalf("GetByPublicID: %v", err)
+	}
+	if !ok || !got.LastLoadedOrChecked.Equal(now) {
+		t.Fatalf("LastLoadedOrChecked = %v, found=%v; want bounded verification time %v", got.LastLoadedOrChecked, ok, now)
+	}
+}
+
+func TestBoundedRefreshRemovesMissingRowsOnlyInsideObservedRange(t *testing.T) {
+	cfg := &config.Config{Mail: config.Mail{Accounts: []config.Account{{
+		ID:       "acct",
+		Email:    "acct@example.com",
+		Host:     "imap.example.com",
+		Port:     993,
+		TLS:      boolPtr(true),
+		Username: "acct@example.com",
+		PasswordRef: config.PasswordRef{
+			Source:   config.PasswordSourceFile,
+			Provider: config.PasswordProviderLocal,
+			ID:       "/ksuite-mail/acct/password",
+		},
+		Policy:  config.PolicyFull,
+		Folders: []string{"INBOX"},
+	}}}}
+	old := time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC)
+	repo := mustOpenRepoForRefresh(t)
+	for _, uid := range []mail.UID{10, 17} {
+		if err := repo.UpsertMessage(mail.CachedMessage{
+			ID:                  mail.PublicID("acct", "INBOX", 123, uid),
+			AccountID:           "acct",
+			Folder:              "INBOX",
+			UIDVALIDITY:         123,
+			UID:                 uid,
+			MessageID:           fmt.Sprintf("<cached-%d>", uid),
+			ThreadKey:           "thread",
+			Subject:             "cached",
+			From:                "a@example.com",
+			To:                  "b@example.com",
+			Date:                old,
+			Snippet:             "cached",
+			BodyText:            "cached body",
+			VisibleReason:       "policy_full",
+			ContentHash:         fmt.Sprintf("h-%d", uid),
+			FirstLoadedAt:       old,
+			LastLoadedOrChecked: old,
+		}); err != nil {
+			t.Fatalf("seed cached UID %d: %v", uid, err)
+		}
+	}
+	if err := repo.UpsertFolderState(cache.FolderState{
+		AccountID:         "acct",
+		Folder:            "INBOX",
+		UIDVALIDITY:       123,
+		UIDNEXT:           21,
+		HighestModSeq:     0,
+		LastSeenUID:       20,
+		PolicyFingerprint: "full:",
+	}); err != nil {
+		t.Fatalf("seed folder state: %v", err)
+	}
+	ad := mailfake.NewAdapter(map[string]map[string][]mailfake.Message{"acct": {"INBOX": {
+		{UID: 16, Envelope: mail.MessageEnvelope{UID: 16, From: "alice@example.com", Subject: "bounded"}, Body: "bounded", VisibleByPolicy: true},
+		{UID: 18, Envelope: mail.MessageEnvelope{UID: 18, From: "alice@example.com", Subject: "bounded"}, Body: "bounded", VisibleByPolicy: true},
+		{UID: 20, Envelope: mail.MessageEnvelope{UID: 20, From: "alice@example.com", Subject: "bounded"}, Body: "bounded", VisibleByPolicy: true},
+	}}})
+
+	if _, err := refresh.Refresh(context.Background(), cfg, repo, ad, refresh.RefreshOptions{MaxCandidates: 5}); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	if _, ok, err := repo.GetByPublicID(mail.PublicID("acct", "INBOX", 123, 17)); err != nil {
+		t.Fatalf("GetByPublicID missing range row: %v", err)
+	} else if ok {
+		t.Fatalf("UID 17 remained cached despite being absent from observed bounded range")
+	}
+	if _, ok, err := repo.GetByPublicID(mail.PublicID("acct", "INBOX", 123, 10)); err != nil {
+		t.Fatalf("GetByPublicID outside range row: %v", err)
+	} else if !ok {
+		t.Fatalf("UID 10 was removed outside the observed bounded range")
 	}
 }
 

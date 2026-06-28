@@ -484,6 +484,26 @@ func (r *Repository) MarkFolderVerified(accountID, folder string, uidvalidity ui
 	return err
 }
 
+// MarkUIDsVerified refreshes TTL verification time for cached rows observed in
+// a bounded refresh window.
+func (r *Repository) MarkUIDsVerified(accountID, folder string, uidvalidity uint64, uids UIDSet, checkedAt time.Time) error {
+	if len(uids) == 0 {
+		return nil
+	}
+	verified := checkedAt.UTC().Format(time.RFC3339Nano)
+	updated := r.now().UTC().Format(time.RFC3339Nano)
+	for uid := range uids {
+		if _, err := r.db.Exec(`
+			UPDATE messages
+			SET last_loaded_or_verified_at=?, updated_at=?
+			WHERE account_id=? AND folder=? AND uidvalidity=? AND uid=?`,
+			verified, updated, accountID, folder, uidvalidity, uid); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // DeleteByMessageRef removes one local row including its FTS entry.
 func (r *Repository) DeleteByMessageRef(ref MessageRef) error {
 	tx, err := r.db.Begin()
@@ -550,6 +570,35 @@ func (r *Repository) DeleteMissingByUIDSet(accountID, folder string, keep UIDSet
 		return err
 	}
 	for _, uid := range local {
+		if _, ok := keep[uid]; ok {
+			continue
+		}
+		if err := r.DeleteByMessageRef(MessageRef{
+			AccountID:   accountID,
+			Folder:      folder,
+			UIDVALIDITY: 0,
+			UID:         uid,
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// DeleteMissingByUIDSetInRange removes local rows inside the observed remote
+// UID range that are not present in keep.
+func (r *Repository) DeleteMissingByUIDSetInRange(accountID, folder string, keep UIDSet, minUID, maxUID mail.UID) error {
+	if minUID > maxUID {
+		return nil
+	}
+	local, err := r.ListUIDsForFolder(accountID, folder)
+	if err != nil {
+		return err
+	}
+	for _, uid := range local {
+		if uid < minUID || uid > maxUID {
+			continue
+		}
 		if _, ok := keep[uid]; ok {
 			continue
 		}
@@ -660,35 +709,48 @@ func (r *Repository) CleanupExpired(ttl time.Duration) error {
 		return err
 	}
 	defer func() { _ = rows.Close() }()
-	var ids []string
-	affectedFolders := map[string]struct{}{}
+	type expiredRow struct {
+		id        string
+		accountID string
+		folder    string
+	}
+	var expired []expiredRow
 	for rows.Next() {
 		var id, accountID, folder string
 		if err := rows.Scan(&id, &accountID, &folder); err != nil {
 			return err
 		}
-		ids = append(ids, id)
-		affectedFolders[accountID+"\x00"+folder] = struct{}{}
+		expired = append(expired, expiredRow{id: id, accountID: accountID, folder: folder})
 	}
 	if err := rows.Err(); err != nil {
 		return err
 	}
-	if len(ids) == 0 {
+	if len(expired) == 0 {
 		return nil
 	}
-	sort.Strings(ids)
+	sort.Slice(expired, func(i, j int) bool { return expired[i].id < expired[j].id })
 	tx, err := r.db.Begin()
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	for _, id := range ids {
-		if _, err := tx.Exec(`DELETE FROM messages WHERE public_id=?`, id); err != nil {
+	affectedFolders := map[string]struct{}{}
+	for _, row := range expired {
+		res, err := tx.Exec(`DELETE FROM messages WHERE public_id=? AND last_loaded_or_verified_at < ?`, row.id, threshold)
+		if err != nil {
 			return rollback(tx, err)
 		}
-		if _, err := tx.Exec(`DELETE FROM messages_fts WHERE public_id=?`, id); err != nil {
+		affected, err := res.RowsAffected()
+		if err != nil {
 			return rollback(tx, err)
 		}
+		if affected == 0 {
+			continue
+		}
+		if _, err := tx.Exec(`DELETE FROM messages_fts WHERE public_id=?`, row.id); err != nil {
+			return rollback(tx, err)
+		}
+		affectedFolders[row.accountID+"\x00"+row.folder] = struct{}{}
 	}
 	for key := range affectedFolders {
 		parts := strings.SplitN(key, "\x00", 2)

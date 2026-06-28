@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/dothackerman/ksuite-mail/internal/api"
 	"github.com/dothackerman/ksuite-mail/internal/cache"
@@ -341,6 +342,63 @@ func TestReadContextReturnsStaleStatusOnRemoteFailure(t *testing.T) {
 	}
 }
 
+func TestDirectReadsScopeStaleStatusToSeedFolder(t *testing.T) {
+	adapter := mailfake.NewAdapter(map[string]map[string][]mailfake.Message{
+		"acct": {
+			"INBOX": {
+				{
+					UID: 3,
+					Envelope: mail.MessageEnvelope{
+						UID:       3,
+						Subject:   "fresh",
+						From:      "a@example.com",
+						ThreadKey: "thread",
+						Snippet:   "fresh",
+					},
+					Body:            "body",
+					VisibleByPolicy: true,
+				},
+			},
+			"Sent": {},
+		},
+	})
+	opts := deploymentWithSource(t, validDomainConfig, adapter)
+	ts := newLocalHTTPServer(t, opts)
+	defer ts.Close()
+
+	listRes := postJSON(t, ts.Client(), ts.URL+"/v1/list", map[string]any{"account": "acct", "folder": "INBOX"})
+	var listEnv api.Envelope
+	if err := json.NewDecoder(listRes.Body).Decode(&listEnv); err != nil {
+		t.Fatalf("decode list: %v", err)
+	}
+	_ = listRes.Body.Close()
+	var list api.ListResponse
+	if err := listEnv.DecodeResult(&list); err != nil || len(list.Results) != 1 {
+		t.Fatalf("decode list payload: %v len=%d", err, len(list.Results))
+	}
+
+	adapter.SetFailure("select", "acct", "Sent", "", fmt.Errorf("remote down"))
+	cases := []struct {
+		name    string
+		path    string
+		payload map[string]any
+	}{
+		{name: "show", path: "/v1/show", payload: map[string]any{"id": list.Results[0].ID, "preview": true}},
+		{name: "thread", path: "/v1/thread", payload: map[string]any{"id": list.Results[0].ID}},
+		{name: "context", path: "/v1/context", payload: map[string]any{"id": list.Results[0].ID, "budget": 100}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			res := postJSON(t, ts.Client(), ts.URL+tc.path, tc.payload)
+			defer func() { _ = res.Body.Close() }()
+			env := decodeEnvelopeBody(t, res.Body)
+			if env.Status != api.StatusOK {
+				t.Fatalf("status = %q, want ok for fresh seed folder despite unrelated failure", env.Status)
+			}
+		})
+	}
+}
+
 func TestReadContextOmitsReplyChainForDomainAccount(t *testing.T) {
 	adapter := mailfake.NewAdapter(map[string]map[string][]mailfake.Message{
 		"acct": {
@@ -612,6 +670,54 @@ func TestReadContextCapsSeedBodyByBudget(t *testing.T) {
 	}
 }
 
+func TestReadContextCapsMultibyteSeedBodyByByteBudget(t *testing.T) {
+	adapter := mailfake.NewAdapter(map[string]map[string][]mailfake.Message{
+		"acct": {
+			"INBOX": {
+				{
+					UID: 7,
+					Envelope: mail.MessageEnvelope{
+						UID:       7,
+						Subject:   "budget",
+						From:      "alice@example.com",
+						ThreadKey: "thread",
+						Snippet:   "seed",
+					},
+					Body:            "éabc",
+					VisibleByPolicy: true,
+				},
+			},
+			"Sent": {},
+		},
+	})
+	ts := newLocalHTTPServer(t, deploymentWithSource(t, validDomainConfig, adapter))
+	defer ts.Close()
+	listRes := postJSON(t, ts.Client(), ts.URL+"/v1/list", map[string]any{"account": "acct", "folder": "INBOX"})
+	var listEnv api.Envelope
+	if err := json.NewDecoder(listRes.Body).Decode(&listEnv); err != nil {
+		t.Fatalf("decode list: %v", err)
+	}
+	_ = listRes.Body.Close()
+	var list api.ListResponse
+	if err := listEnv.DecodeResult(&list); err != nil || len(list.Results) != 1 {
+		t.Fatalf("decode list payload: %v len=%d", err, len(list.Results))
+	}
+
+	ctxRes := postJSON(t, ts.Client(), ts.URL+"/v1/context", map[string]any{"id": list.Results[0].ID, "budget": 1})
+	defer func() { _ = ctxRes.Body.Close() }()
+	env := decodeEnvelopeBody(t, ctxRes.Body)
+	var got api.ContextResponse
+	if err := env.DecodeResult(&got); err != nil {
+		t.Fatalf("decode context: %v", err)
+	}
+	if len(got.Seed.BodyText) > 1 {
+		t.Fatalf("seed body byte length = %d, want <= 1 for budget", len(got.Seed.BodyText))
+	}
+	if !utf8.ValidString(got.Seed.BodyText) {
+		t.Fatalf("seed body is invalid UTF-8: %q", got.Seed.BodyText)
+	}
+}
+
 func TestReadContextPreservesZeroRemainingBudget(t *testing.T) {
 	adapter := mailfake.NewAdapter(map[string]map[string][]mailfake.Message{
 		"acct": {
@@ -832,6 +938,22 @@ func TestReadListClampsConfiguredRefreshFloor(t *testing.T) {
 	}
 	if previewCalls != maxReadWindow {
 		t.Fatalf("preview calls = %d, want clamp at maxReadWindow %d", previewCalls, maxReadWindow)
+	}
+}
+
+func TestReadListRejectsConfiguredDefaultPlusOffsetWindow(t *testing.T) {
+	cfg := strings.Replace(validDomainConfig, "default_limit = 50", "default_limit = 800", 1)
+	adapter := mailfake.NewAdapter(map[string]map[string][]mailfake.Message{"acct": {"INBOX": {}, "Sent": {}}})
+	ts := newLocalHTTPServer(t, deploymentWithSource(t, cfg, adapter))
+	defer ts.Close()
+
+	res := postJSON(t, ts.Client(), ts.URL+"/v1/list", map[string]any{"account": "acct", "folder": "INBOX", "offset": 500})
+	defer func() { _ = res.Body.Close() }()
+	if res.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", res.StatusCode)
+	}
+	if calls := adapter.CallsSnapshot(); len(calls) != 0 {
+		t.Fatalf("remote refresh ran for oversized configured default window: %+v", calls)
 	}
 }
 
@@ -1077,7 +1199,7 @@ func TestReadContextWithEmptyThreadKeyReturnsNoUnrelatedTimeline(t *testing.T) {
 
 func TestNormalizeReadPageRejectsOverflowWindow(t *testing.T) {
 	maxInt := int(^uint(0) >> 1)
-	if _, _, ok := normalizeReadPage(maxInt, maxInt); ok {
+	if _, _, ok := normalizeReadPage(0, maxInt, maxInt); ok {
 		t.Fatalf("normalizeReadPage accepted overflowing window")
 	}
 }

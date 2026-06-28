@@ -152,12 +152,18 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	limit, offset, ok := normalizeReadPage(req.Limit, req.Offset)
+	cfg, err := s.loadConfig()
+	if err != nil {
+		s.writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
+		return
+	}
+
+	limit, offset, ok := normalizeReadPage(cfg.Mail.DefaultLimit, req.Limit, req.Offset)
 	if !ok {
 		s.writeError(w, http.StatusBadRequest, "bad_request", "limit plus offset exceeds maximum read window")
 		return
 	}
-	cfg, repo, refreshRes, err := s.refreshAndLoad(r.Context(), limit+offset)
+	cfg, repo, refreshRes, err := s.refreshAndLoadConfig(r.Context(), cfg, limit+offset)
 	if err != nil {
 		s.writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
 		return
@@ -201,12 +207,18 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	limit, offset, ok := normalizeReadPage(req.Limit, req.Offset)
+	cfg, err := s.loadConfig()
+	if err != nil {
+		s.writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
+		return
+	}
+
+	limit, offset, ok := normalizeReadPage(cfg.Mail.DefaultLimit, req.Limit, req.Offset)
 	if !ok {
 		s.writeError(w, http.StatusBadRequest, "bad_request", "limit plus offset exceeds maximum read window")
 		return
 	}
-	cfg, repo, refreshRes, err := s.refreshAndLoad(r.Context(), limit+offset)
+	cfg, repo, refreshRes, err := s.refreshAndLoadConfig(r.Context(), cfg, limit+offset)
 	if err != nil {
 		s.writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
 		return
@@ -293,7 +305,7 @@ func (s *Server) handleShow(w http.ResponseWriter, r *http.Request) {
 		Result:  toMessageDetail(msg, body, includeBody),
 		Refresh: refreshRes.Meta,
 	}
-	status := api.ReadStatus(refreshRes.Meta, refreshRes.Partial, true)
+	status := readStatusForScope(refreshRes, msg.AccountID, msg.Folder, true)
 	s.writeReadOK(w, status, resp, refreshRes.Warnings)
 }
 
@@ -360,7 +372,7 @@ func (s *Server) handleThread(w http.ResponseWriter, r *http.Request) {
 		Messages:  results,
 		Refresh:   refreshRes.Meta,
 	}
-	status := api.ReadStatus(refreshRes.Meta, refreshRes.Partial, len(results) > 0)
+	status := readStatusForScope(refreshRes, seed.AccountID, seed.Folder, len(results) > 0)
 	s.writeReadOK(w, status, resp, refreshRes.Warnings)
 }
 
@@ -440,7 +452,7 @@ func (s *Server) handleContext(w http.ResponseWriter, r *http.Request) {
 		}
 		seedBody = stripEmbeddedReplies(seed.BodyText)
 		if remaining > 0 {
-			seedBody = truncateText(seedBody, min(defaultContextMax, remaining))
+			seedBody = truncateTextBytes(seedBody, min(defaultContextMax, remaining))
 		} else {
 			seedBody = ""
 		}
@@ -451,7 +463,7 @@ func (s *Server) handleContext(w http.ResponseWriter, r *http.Request) {
 		Refresh:       refreshRes.Meta,
 		MessageBudget: budget,
 	}
-	status := api.ReadStatus(refreshRes.Meta, refreshRes.Partial, true)
+	status := readStatusForScope(refreshRes, seed.AccountID, seed.Folder, true)
 	s.writeReadOK(w, status, resp, refreshRes.Warnings)
 }
 
@@ -600,8 +612,8 @@ func normalizeContextBudget(requestedBudget int) (int, bool) {
 	return budget, true
 }
 
-func normalizeReadPage(requestedLimit, requestedOffset int) (int, int, bool) {
-	limit := withDefault(0, requestedLimit, defaultLimit)
+func normalizeReadPage(configDefault, requestedLimit, requestedOffset int) (int, int, bool) {
+	limit := effectiveReadLimit(configDefault, requestedLimit)
 	offset := max(0, requestedOffset)
 	if limit > maxReadWindow || offset > maxReadWindow-limit {
 		return 0, 0, false
@@ -649,7 +661,10 @@ func refreshAffectsScope(warnings []refresh.Warning, requestedAccount, requested
 }
 
 func effectiveReadLimit(configDefault, requestedLimit int) int {
-	limit := withDefault(configDefault, requestedLimit, defaultLimit)
+	if requestedLimit > 0 {
+		return requestedLimit
+	}
+	limit := withDefault(configDefault, 0, defaultLimit)
 	if limit > maxReadWindow {
 		return maxReadWindow
 	}
@@ -661,6 +676,10 @@ func (s *Server) refreshAndLoad(ctx context.Context, minCandidates int) (*config
 	if err != nil {
 		return nil, nil, refresh.Result{}, err
 	}
+	return s.refreshAndLoadConfig(ctx, cfg, minCandidates)
+}
+
+func (s *Server) refreshAndLoadConfig(ctx context.Context, cfg *config.Config, minCandidates int) (*config.Config, *cache.Repository, refresh.Result, error) {
 	repo, err := s.openRepository()
 	if err != nil {
 		return nil, nil, refresh.Result{}, err
@@ -915,6 +934,26 @@ func truncateText(s string, maxChars int) string {
 		maxChars--
 	}
 	return s
+}
+
+func truncateTextBytes(s string, maxBytes int) string {
+	if maxBytes <= 0 {
+		return ""
+	}
+	if len(s) <= maxBytes {
+		return s
+	}
+	last := 0
+	for i := range s {
+		if i > maxBytes {
+			return s[:last]
+		}
+		if i == maxBytes {
+			return s[:i]
+		}
+		last = i
+	}
+	return s[:last]
 }
 
 func cleanupExpired(repo *cache.Repository, cfg *config.Config) error {

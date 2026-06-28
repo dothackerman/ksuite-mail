@@ -180,6 +180,7 @@ func refreshFolder(
 		return err
 	}
 	keep := cache.UIDSet{}
+	cachedObserved := cache.UIDSet{}
 	fetchUIDs := candidates
 	if state != nil && state.PolicyFingerprint == fingerprint && cachedUIDsAreCurrent(state, remote) {
 		fetchUIDs, err = uncachedUIDs(ctxRepo, account.ID, folder, candidates)
@@ -189,6 +190,7 @@ func refreshFolder(
 		for _, uid := range candidates {
 			if !uidInSlice(fetchUIDs, uid) {
 				keep[uid] = struct{}{}
+				cachedObserved[uid] = struct{}{}
 			}
 		}
 	}
@@ -247,6 +249,14 @@ func refreshFolder(
 			return localCacheError{err: err}
 		}
 		if err := ctxRepo.MarkFolderVerified(account.ID, folder, remote.UIDVALIDITY, now); err != nil {
+			return localCacheError{err: err}
+		}
+	} else if len(candidates) > 0 {
+		if err := ctxRepo.MarkUIDsVerified(account.ID, folder, remote.UIDVALIDITY, cachedObserved, now); err != nil {
+			return localCacheError{err: err}
+		}
+		minUID, maxUID := uidBounds(candidates)
+		if err := ctxRepo.DeleteMissingByUIDSetInRange(account.ID, folder, keep, minUID, maxUID); err != nil {
 			return localCacheError{err: err}
 		}
 	}
@@ -316,6 +326,20 @@ func uidInSlice(uids []mail.UID, needle mail.UID) bool {
 		}
 	}
 	return false
+}
+
+func uidBounds(uids []mail.UID) (mail.UID, mail.UID) {
+	minUID := uids[0]
+	maxUID := uids[0]
+	for _, uid := range uids[1:] {
+		if uid < minUID {
+			minUID = uid
+		}
+		if uid > maxUID {
+			maxUID = uid
+		}
+	}
+	return minUID, maxUID
 }
 
 func discoverCandidates(
