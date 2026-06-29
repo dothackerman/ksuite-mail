@@ -28,6 +28,15 @@ User acceptance testing verifies that a completed slice works through the same l
 
 Raw run artifacts must not be committed. They belong under `.uat-runs/`, which is ignored by git.
 
+Each scenario outcome needs enough safe evidence for a reviewer to understand the result:
+
+| Outcome | Checked-in or tracker evidence |
+|---|---|
+| `passed` | Sanitized command shape, environment summary, safe result codes or booleans, and any relevant counts. |
+| `failed` | Link to a bug issue with sanitized reproduction detail, expected behavior, observed safe result, and local raw artifact path. |
+| `inconclusive` | The missing fixture, unavailable environment condition, provider prerequisite, or other blocker that prevented a decision. |
+| `not_run` | The reason the scenario was intentionally skipped for this run. |
+
 Checked-in UAT docs and tracker comments may include:
 
 - scenario name
