@@ -120,6 +120,27 @@ func TestDoctorOverSocket(t *testing.T) {
 	}
 }
 
+func TestProbeIMAPOverSocket(t *testing.T) {
+	c := udsclient.New(startDaemon(t, nil))
+	env, err := c.ProbeIMAP(context.Background(), api.ProbeIMAPRequest{Account: "rs_info"})
+	if err != nil {
+		t.Fatalf("ProbeIMAP: %v", err)
+	}
+	if env.Status != api.StatusOK {
+		t.Fatalf("status = %q, want ok", env.Status)
+	}
+	var probe api.ProbeIMAPResponse
+	if err := env.DecodeResult(&probe); err != nil {
+		t.Fatalf("decode probe: %v", err)
+	}
+	if probe.Account != "rs_info" {
+		t.Fatalf("account = %q, want rs_info", probe.Account)
+	}
+	if len(probe.Checks) == 0 {
+		t.Fatalf("expected probe checks")
+	}
+}
+
 func TestUnreachableSocketIsTyped(t *testing.T) {
 	c := udsclient.New(filepath.Join(t.TempDir(), "absent.sock"))
 	_, err := c.Doctor(context.Background())

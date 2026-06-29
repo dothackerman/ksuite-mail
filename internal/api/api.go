@@ -38,6 +38,14 @@ const (
 	CheckSkip = "skip"
 )
 
+// Provider probe aggregate statuses and per-check outcomes.
+const (
+	ProbeStatusPassed        = "passed"
+	ProbeStatusFailed        = "failed"
+	ProbeStatusInconclusive  = "inconclusive"
+	ProbeStatusNotApplicable = "not_applicable"
+)
+
 // Warning is a non-fatal, safe-to-display advisory.
 type Warning struct {
 	Code    string `json:"code"`
@@ -167,6 +175,12 @@ type ContextRequest struct {
 	Budget int    `json:"budget"`
 }
 
+// ProbeIMAPRequest defines /v1/probe/imap payload. Account is mandatory and
+// must name an existing daemon-side account.
+type ProbeIMAPRequest struct {
+	Account string `json:"account"`
+}
+
 // ListResponse is returned by /v1/list.
 type ListResponse struct {
 	Results []MessageSummary `json:"results"`
@@ -198,6 +212,24 @@ type ContextResponse struct {
 	Timeline      []MessageSummary `json:"timeline"`
 	Refresh       RefreshMeta      `json:"refresh"`
 	MessageBudget int              `json:"message_budget"`
+}
+
+// ProbeIMAPResponse is returned by /v1/probe/imap. It is intentionally limited
+// to sanitized fixed-checklist facts: no credentials, raw IMAP text, provider
+// error text, message content, headers, subjects, bodies, or attachment names.
+type ProbeIMAPResponse struct {
+	Account string       `json:"account"`
+	Status  string       `json:"status"`
+	Checks  []ProbeCheck `json:"checks"`
+}
+
+// ProbeCheck is one fixed provider-probe checklist outcome. Status values are
+// stable strings such as passed, failed, inconclusive, and not_applicable.
+type ProbeCheck struct {
+	ID     string `json:"id"`
+	Status string `json:"status"`
+	Code   string `json:"code,omitempty"`
+	Detail string `json:"detail,omitempty"`
 }
 
 // ReadStatus determines which top-level status applies to read responses.

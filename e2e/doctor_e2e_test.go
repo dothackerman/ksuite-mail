@@ -239,6 +239,100 @@ func TestDoctorEndToEnd(t *testing.T) {
 	if len(env.Result.Checks) == 0 {
 		t.Fatalf("doctor report had no checks: %s", out)
 	}
+	if strings.Contains(string(out), "domain_header_search") || strings.Contains(string(out), "uid_behavior") {
+		t.Fatalf("doctor output included provider probe checks:\n%s", out)
+	}
+}
+
+// TestProbeIMAPEndToEnd verifies the public probe command reaches daemon-owned
+// handling over the Unix socket and returns only a sanitized structured result.
+func TestProbeIMAPEndToEnd(t *testing.T) {
+	root := moduleRoot(t)
+	work := t.TempDir()
+
+	cli := build(t, root, "./cmd/ksuite-mail", work)
+	daemonBin := build(t, root, "./cmd/ksuite-maild", work)
+
+	cfgPath := filepath.Join(work, "config.toml")
+	secPath := filepath.Join(work, "secrets.json")
+	stateDir := filepath.Join(work, "state")
+	sock := filepath.Join(work, "d.sock")
+	if err := os.WriteFile(cfgPath, []byte(e2eConfig), 0o640); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	if err := os.WriteFile(secPath,
+		[]byte(`{"version":1,"secrets":{"/ksuite-mail/rs_info/password":"`+e2eSecret+`"}}`), 0o600); err != nil {
+		t.Fatalf("write secrets: %v", err)
+	}
+	if err := os.Mkdir(stateDir, 0o700); err != nil {
+		t.Fatalf("mkdir state: %v", err)
+	}
+
+	daemonCmd := exec.Command(daemonBin,
+		"--config", cfgPath, "--secrets", secPath, "--state-dir", stateDir, "--socket", sock)
+	run := startDaemon(t, daemonCmd)
+	waitForSocket(t, sock, run)
+
+	out, err := exec.Command(cli, "probe", "imap", "--socket", sock, "--account", "rs_info", "--json").Output()
+	if code := exitCode(t, err); code != 0 {
+		t.Fatalf("probe exit = %d, want 0\noutput: %s", code, out)
+	}
+	if strings.Contains(string(out), e2eSecret) || strings.Contains(string(out), "raw") {
+		t.Fatalf("probe output leaked secret or raw-provider detail:\n%s", out)
+	}
+
+	var env struct {
+		Status string `json:"status"`
+		Result struct {
+			Account string `json:"account"`
+			Status  string `json:"status"`
+			Checks  []struct {
+				ID     string `json:"id"`
+				Status string `json:"status"`
+			} `json:"checks"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(out, &env); err != nil {
+		t.Fatalf("parse probe JSON: %v\noutput: %s", err, out)
+	}
+	if env.Status != "ok" || env.Result.Account != "rs_info" || env.Result.Status != "inconclusive" {
+		t.Fatalf("unexpected probe response: %s", out)
+	}
+	if len(env.Result.Checks) == 0 {
+		t.Fatalf("probe response had no checks: %s", out)
+	}
+	for _, check := range env.Result.Checks {
+		if check.ID == "" {
+			t.Fatalf("probe check had no stable id: %s", out)
+		}
+		if check.Status == "pass" || check.Status == "fail" {
+			t.Fatalf("probe check used legacy status vocabulary: %s", out)
+		}
+	}
+}
+
+func TestProbeIMAPRejectsMissingAccountBeforeDaemon(t *testing.T) {
+	root := moduleRoot(t)
+	work := t.TempDir()
+	cli := build(t, root, "./cmd/ksuite-mail", work)
+
+	out, err := exec.Command(cli, "probe", "imap", "--json").Output()
+	if code := exitCode(t, err); code != 2 {
+		t.Fatalf("probe missing account exit = %d, want 2\noutput: %s", code, out)
+	}
+	var env struct {
+		Status string `json:"status"`
+		Error  struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(out, &env); err != nil {
+		t.Fatalf("parse probe validation JSON: %v\noutput: %s", err, out)
+	}
+	if env.Status != "error" || env.Error.Code != "bad_request" || env.Error.Message != "account is required" {
+		t.Fatalf("unexpected validation envelope: %s", out)
+	}
 }
 
 // TestDoctorUnreachableDaemon runs the CLI against a socket with no daemon and

@@ -87,6 +87,11 @@ func (c *Client) Context(ctx context.Context, req api.ContextRequest) (api.Envel
 	return c.do(ctx, http.MethodPost, "/v1/context", req)
 }
 
+// ProbeIMAP calls POST /v1/probe/imap.
+func (c *Client) ProbeIMAP(ctx context.Context, req api.ProbeIMAPRequest) (api.Envelope, error) {
+	return c.do(ctx, http.MethodPost, "/v1/probe/imap", req)
+}
+
 func (c *Client) do(ctx context.Context, method, path string, payload any) (api.Envelope, error) {
 	var body []byte
 	var err error
