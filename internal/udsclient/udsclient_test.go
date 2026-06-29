@@ -173,8 +173,8 @@ func TestShowOverSocket(t *testing.T) {
 	if env.Status != api.StatusError {
 		t.Fatalf("show status = %q", env.Status)
 	}
-	if env.Error != nil {
-		t.Fatalf("expected structured refresh failure envelope, got error %+v", env.Error)
+	if env.Error == nil || env.Error.Code != "remote_refresh_failed" {
+		t.Fatalf("expected structured refresh failure error, got %+v", env.Error)
 	}
 	var show api.ShowResponse
 	if err := env.DecodeResult(&show); err != nil {
@@ -194,8 +194,8 @@ func TestThreadAndContextOverSocket(t *testing.T) {
 	if threadEnv.Status != api.StatusError {
 		t.Fatalf("thread status = %q", threadEnv.Status)
 	}
-	if threadEnv.Error != nil {
-		t.Fatalf("expected structured thread refresh failure envelope, got error %+v", threadEnv.Error)
+	if threadEnv.Error == nil || threadEnv.Error.Code != "remote_refresh_failed" {
+		t.Fatalf("expected structured thread refresh failure error, got %+v", threadEnv.Error)
 	}
 	var thread api.ThreadResponse
 	if err := threadEnv.DecodeResult(&thread); err != nil {
@@ -212,8 +212,8 @@ func TestThreadAndContextOverSocket(t *testing.T) {
 	if ctxEnv.Status != api.StatusError {
 		t.Fatalf("context status = %q", ctxEnv.Status)
 	}
-	if ctxEnv.Error != nil {
-		t.Fatalf("expected structured context refresh failure envelope, got error %+v", ctxEnv.Error)
+	if ctxEnv.Error == nil || ctxEnv.Error.Code != "remote_refresh_failed" {
+		t.Fatalf("expected structured context refresh failure error, got %+v", ctxEnv.Error)
 	}
 	var contextResp api.ContextResponse
 	if err := ctxEnv.DecodeResult(&contextResp); err != nil {

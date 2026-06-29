@@ -784,6 +784,13 @@ func (r *Repository) CleanupExpired(ttl time.Duration) error {
 		if len(parts) != 2 {
 			continue
 		}
+		var retained int
+		if err := tx.QueryRow(`SELECT COUNT(*) FROM messages WHERE account_id=? AND folder=?`, parts[0], parts[1]).Scan(&retained); err != nil {
+			return rollback(tx, err)
+		}
+		if retained > 0 {
+			continue
+		}
 		if _, err := tx.Exec(`DELETE FROM folder_state WHERE account_id=? AND folder=?`, parts[0], parts[1]); err != nil {
 			return rollback(tx, err)
 		}

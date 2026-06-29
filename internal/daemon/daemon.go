@@ -186,10 +186,10 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 
 	resp := api.ListResponse{
 		Results: results,
-		Refresh: refreshRes.Meta,
 	}
-	status := readStatusForScope(refreshRes, req.Account, req.Folder, len(results) > 0)
-	s.writeReadOK(w, status, resp, refreshRes.Warnings)
+	status, meta, warnings := readEnvelopeForScope(refreshRes, req.Account, req.Folder, len(results) > 0)
+	resp.Refresh = meta
+	s.writeReadOK(w, status, resp, warnings)
 }
 
 func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
@@ -242,10 +242,10 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 
 	resp := api.SearchResponse{
 		Results: results,
-		Refresh: refreshRes.Meta,
 	}
-	status := readStatusForScope(refreshRes, req.Account, req.Folder, len(results) > 0)
-	s.writeReadOK(w, status, resp, refreshRes.Warnings)
+	status, meta, warnings := readEnvelopeForScope(refreshRes, req.Account, req.Folder, len(results) > 0)
+	resp.Refresh = meta
+	s.writeReadOK(w, status, resp, warnings)
 }
 
 func (s *Server) handleShow(w http.ResponseWriter, r *http.Request) {
@@ -302,11 +302,11 @@ func (s *Server) handleShow(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp := api.ShowResponse{
-		Result:  toMessageDetail(msg, body, includeBody),
-		Refresh: refreshRes.Meta,
+		Result: toMessageDetail(msg, body, includeBody),
 	}
-	status := readStatusForScope(refreshRes, msg.AccountID, msg.Folder, true)
-	s.writeReadOK(w, status, resp, refreshRes.Warnings)
+	status, meta, warnings := readEnvelopeForScope(refreshRes, msg.AccountID, msg.Folder, true)
+	resp.Refresh = meta
+	s.writeReadOK(w, status, resp, warnings)
 }
 
 func (s *Server) handleThread(w http.ResponseWriter, r *http.Request) {
@@ -374,10 +374,10 @@ func (s *Server) handleThread(w http.ResponseWriter, r *http.Request) {
 	resp := api.ThreadResponse{
 		ThreadKey: seed.ThreadKey,
 		Messages:  results,
-		Refresh:   refreshRes.Meta,
 	}
-	status := readStatusForMessages(refreshRes, threadMessages)
-	s.writeReadOK(w, status, resp, refreshRes.Warnings)
+	status, meta, warnings := readEnvelopeForMessages(refreshRes, threadMessages)
+	resp.Refresh = meta
+	s.writeReadOK(w, status, resp, warnings)
 }
 
 func (s *Server) handleContext(w http.ResponseWriter, r *http.Request) {
@@ -464,11 +464,11 @@ func (s *Server) handleContext(w http.ResponseWriter, r *http.Request) {
 	resp := api.ContextResponse{
 		Seed:          toMessageDetail(seed, seedBody, true),
 		Timeline:      timeline,
-		Refresh:       refreshRes.Meta,
 		MessageBudget: budget,
 	}
-	status := readStatusForScope(refreshRes, seed.AccountID, seed.Folder, true)
-	s.writeReadOK(w, status, resp, refreshRes.Warnings)
+	status, meta, warnings := readEnvelopeForMessages(refreshRes, append([]mail.CachedMessage{seed}, msgs...))
+	resp.Refresh = meta
+	s.writeReadOK(w, status, resp, warnings)
 }
 
 func (s *Server) writeReadOK(w http.ResponseWriter, status string, payload any, warnings []refresh.Warning) {
@@ -480,6 +480,9 @@ func (s *Server) writeReadOK(w http.ResponseWriter, status string, payload any, 
 	if err != nil {
 		s.writeError(w, http.StatusInternalServerError, "internal_error", "could not build response")
 		return
+	}
+	if status == api.StatusError {
+		env.Error = &api.Error{Code: "remote_refresh_failed", Message: "remote refresh failed and no local cached result was available"}
 	}
 	s.writeJSON(w, http.StatusOK, env)
 }
@@ -637,27 +640,34 @@ func threadMessagesLoader(repo *cache.Repository, seed mail.CachedMessage) func(
 	}
 }
 
-func readStatusForScope(refreshRes refresh.Result, requestedAccount, requestedFolder string, localFound bool) string {
+func readEnvelopeForScope(refreshRes refresh.Result, requestedAccount, requestedFolder string, localFound bool) (string, cache.RefreshMeta, []refresh.Warning) {
 	if !refreshRes.Partial || refreshAffectsScope(refreshRes.Warnings, requestedAccount, requestedFolder) {
-		return api.ReadStatus(refreshRes.Meta, refreshRes.Partial, localFound)
+		warnings := warningsForScope(refreshRes.Warnings, requestedAccount, requestedFolder)
+		return api.ReadStatus(refreshRes.Meta, refreshRes.Partial, localFound), refreshRes.Meta, warnings
 	}
 	meta := refreshRes.Meta
 	meta.RemoteOK = true
-	return api.ReadStatus(meta, false, localFound)
+	return api.ReadStatus(meta, false, localFound), meta, nil
 }
 
-func readStatusForMessages(refreshRes refresh.Result, messages []mail.CachedMessage) string {
+func readEnvelopeForMessages(refreshRes refresh.Result, messages []mail.CachedMessage) (string, cache.RefreshMeta, []refresh.Warning) {
 	if len(messages) == 0 {
-		return readStatusForScope(refreshRes, "", "", false)
+		return readEnvelopeForScope(refreshRes, "", "", false)
 	}
+	affected := false
 	for _, msg := range messages {
 		if refreshAffectsScope(refreshRes.Warnings, msg.AccountID, msg.Folder) {
-			return api.ReadStatus(refreshRes.Meta, refreshRes.Partial, true)
+			affected = true
+			break
 		}
+	}
+	if affected {
+		warnings := warningsForMessages(refreshRes.Warnings, messages)
+		return api.ReadStatus(refreshRes.Meta, refreshRes.Partial, true), refreshRes.Meta, warnings
 	}
 	meta := refreshRes.Meta
 	meta.RemoteOK = true
-	return api.ReadStatus(meta, false, true)
+	return api.ReadStatus(meta, false, true), meta, nil
 }
 
 func refreshAffectsScope(warnings []refresh.Warning, requestedAccount, requestedFolder string) bool {
@@ -676,6 +686,43 @@ func refreshAffectsScope(warnings []refresh.Warning, requestedAccount, requested
 		return true
 	}
 	return len(warnings) == 0
+}
+
+func warningsForScope(warnings []refresh.Warning, requestedAccount, requestedFolder string) []refresh.Warning {
+	account := accountFilter(requestedAccount)
+	folder := strings.TrimSpace(requestedFolder)
+	out := make([]refresh.Warning, 0, len(warnings))
+	for _, warning := range warnings {
+		if warning.AccountID != "" && account != "" && warning.AccountID != account {
+			continue
+		}
+		if warning.Folder != "" && folder != "" && warning.Folder != folder {
+			continue
+		}
+		out = append(out, warning)
+	}
+	return out
+}
+
+func warningsForMessages(warnings []refresh.Warning, messages []mail.CachedMessage) []refresh.Warning {
+	out := make([]refresh.Warning, 0, len(warnings))
+	for _, warning := range warnings {
+		if warning.AccountID == "" {
+			out = append(out, warning)
+			continue
+		}
+		for _, msg := range messages {
+			if warning.AccountID != msg.AccountID {
+				continue
+			}
+			if warning.Folder != "" && warning.Folder != msg.Folder {
+				continue
+			}
+			out = append(out, warning)
+			break
+		}
+	}
+	return out
 }
 
 func effectiveReadLimit(configDefault, requestedLimit int) int {

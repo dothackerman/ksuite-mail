@@ -18,6 +18,9 @@ import (
 // DefaultPreviewBytes is used to cache body previews during refresh.
 const DefaultPreviewBytes = 4096
 
+// DefaultSnippetBytes caps cached summary snippets for compact read responses.
+const DefaultSnippetBytes = 512
+
 // Warning carries a structured, redacted remote or policy warning for command responses.
 type Warning struct {
 	Code      string
@@ -235,7 +238,7 @@ func refreshFolder(
 			return err
 		}
 		bodyText = stripEmbeddedReplies(bodyText)
-		snippet := stripEmbeddedReplies(env.Snippet)
+		snippet := truncateTextBytes(stripEmbeddedReplies(env.Snippet), DefaultSnippetBytes)
 		msg := mail.CachedMessage{
 			ID:                  mail.PublicID(account.ID, folder, remote.UIDVALIDITY, env.UID),
 			AccountID:           account.ID,
@@ -271,7 +274,7 @@ func refreshFolder(
 		if err := ctxRepo.MarkFolderVerified(account.ID, folder, remote.UIDVALIDITY, now); err != nil {
 			return localCacheError{err: err}
 		}
-	} else if len(candidates) > 0 {
+	} else if len(candidates) > 0 || discovered.UseScopeBounds {
 		if err := ctxRepo.MarkUIDsVerified(account.ID, folder, remote.UIDVALIDITY, cachedObserved, now); err != nil {
 			return localCacheError{err: err}
 		}
@@ -517,4 +520,24 @@ func stripEmbeddedReplies(body string) string {
 
 func isReplyBoundary(line string) bool {
 	return strings.HasPrefix(line, "On ") && strings.Contains(line, "wrote:")
+}
+
+func truncateTextBytes(s string, maxBytes int) string {
+	if maxBytes <= 0 {
+		return ""
+	}
+	if len(s) <= maxBytes {
+		return s
+	}
+	last := 0
+	for i := range s {
+		if i > maxBytes {
+			return s[:last]
+		}
+		if i == maxBytes {
+			return s[:i]
+		}
+		last = i
+	}
+	return s[:last]
 }
