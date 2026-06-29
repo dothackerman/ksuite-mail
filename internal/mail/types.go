@@ -5,10 +5,14 @@ package mail
 import (
 	"crypto/sha256"
 	"encoding/base32"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 )
+
+// ErrSourceUnavailable marks a configured-but-unwired remote mail source.
+var ErrSourceUnavailable = errors.New("remote mail source unavailable")
 
 // UID is a local mailbox UID within an IMAP folder.
 type UID uint32
@@ -24,7 +28,8 @@ type FolderState struct {
 	LastSuccessfulRefresh time.Time
 }
 
-// MessageEnvelope is the minimal normalized data required from the IMAP adapter.
+// MessageEnvelope is the normalized message metadata/content shape fetched
+// after policy has allowed a UID.
 type MessageEnvelope struct {
 	UID            UID
 	MessageID      string
@@ -40,6 +45,16 @@ type MessageEnvelope struct {
 	BodyPreview    string
 	HasAttachments bool
 	ContentHash    string
+}
+
+// MessageHeaders is the minimal header-only shape used to validate policy
+// before fetching snippets, bodies, or other content-derived metadata.
+type MessageHeaders struct {
+	UID  UID
+	From string
+	To   string
+	Cc   string
+	Bcc  string
 }
 
 // CachedMessage is the compact cache shape read by API endpoints.

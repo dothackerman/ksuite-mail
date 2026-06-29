@@ -75,9 +75,17 @@ func TestDomainRefreshUsesSearchBeforeFetch(t *testing.T) {
 	if calls[1].Method != "search" {
 		t.Fatalf("second call = %+v, want search", calls[1])
 	}
+	headersSeen := false
 	fetchSeen := false
 	for _, call := range calls {
+		if call.Method == "headers" {
+			headersSeen = true
+			continue
+		}
 		if call.Method == "fetch" {
+			if !headersSeen {
+				t.Fatalf("fetch happened before header validation: calls=%+v", calls)
+			}
 			fetchSeen = true
 			break
 		}
@@ -144,6 +152,11 @@ func TestDomainRefreshSkipsNonPolicyMessages(t *testing.T) {
 	}
 	if len(msgs) != 0 {
 		t.Fatalf("expected no cached messages, got %d", len(msgs))
+	}
+	for _, call := range ad.CallsSnapshot() {
+		if call.Method == "fetch" || call.Method == "preview" {
+			t.Fatalf("content fetch happened for non-policy UID: calls=%+v", ad.CallsSnapshot())
+		}
 	}
 }
 
@@ -1437,6 +1450,10 @@ func (s *trackingSource) SearchAllowed(context.Context, config.Account, string, 
 }
 
 func (s *trackingSource) ListUIDs(context.Context, config.Account, string, mail.UIDRange) ([]mail.UID, error) {
+	return nil, nil
+}
+
+func (s *trackingSource) FetchHeaders(context.Context, config.Account, string, []mail.UID) ([]mail.MessageHeaders, error) {
 	return nil, nil
 }
 

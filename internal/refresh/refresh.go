@@ -23,10 +23,11 @@ const DefaultSnippetBytes = 512
 
 // Warning carries a structured, redacted remote or policy warning for command responses.
 type Warning struct {
-	Code      string
-	Message   string
-	AccountID string
-	Folder    string
+	Code                    string
+	Message                 string
+	AccountID               string
+	Folder                  string
+	LastSuccessfulRefreshAt *time.Time
 }
 
 const (
@@ -53,6 +54,7 @@ type source interface {
 	SelectFolder(ctx context.Context, acct config.Account, folder string) (mail.RemoteFolderState, error)
 	SearchAllowed(ctx context.Context, acct config.Account, folder string, header string, value string, scope mail.UIDRange) ([]mail.UID, error)
 	ListUIDs(ctx context.Context, acct config.Account, folder string, scope mail.UIDRange) ([]mail.UID, error)
+	FetchHeaders(ctx context.Context, acct config.Account, folder string, uids []mail.UID) ([]mail.MessageHeaders, error)
 	FetchEnvelopes(ctx context.Context, acct config.Account, folder string, uids []mail.UID) ([]mail.MessageEnvelope, error)
 	FetchBodyPreview(ctx context.Context, acct config.Account, folder string, uid mail.UID, maxBytes int) (string, error)
 }
@@ -111,10 +113,11 @@ func Refresh(ctx context.Context, cfg *config.Config, repo *cache.Repository, sr
 				allSuccess = false
 				res.Partial = true
 				res.Warnings = append(res.Warnings, Warning{
-					Code:      remoteErrorCode(err),
-					Message:   "remote refresh failed for one or more folders",
-					AccountID: account.ID,
-					Folder:    folder,
+					Code:                    remoteErrorCode(err),
+					Message:                 "remote refresh failed for one or more folders",
+					AccountID:               account.ID,
+					Folder:                  folder,
+					LastSuccessfulRefreshAt: folderLastSuccessfulRefreshAt(repo, account.ID, folder),
 				})
 				continue
 			}
@@ -217,18 +220,21 @@ func refreshFolder(
 			}
 		}
 	}
+	allowedUIDs, reasons, err := policyAllowedUIDs(ctx, src, account, folder, fetchUIDs)
+	if err != nil {
+		return err
+	}
 	var envelopes []mail.MessageEnvelope
-	if len(fetchUIDs) > 0 {
-		envelopes, err = src.FetchEnvelopes(ctx, *account, folder, fetchUIDs)
+	if len(allowedUIDs) > 0 {
+		envelopes, err = src.FetchEnvelopes(ctx, *account, folder, allowedUIDs)
 		if err != nil {
 			return err
 		}
 	}
 
 	for _, env := range envelopes {
-		ok, reason := policy.DomainMatch(*account, env)
+		reason, ok := reasons[env.UID]
 		if !ok {
-			delete(keep, env.UID)
 			continue
 		}
 		keep[env.UID] = struct{}{}
@@ -311,6 +317,56 @@ func refreshFolder(
 		return localCacheError{err: err}
 	}
 	return nil
+}
+
+func folderLastSuccessfulRefreshAt(repo *cache.Repository, accountID, folder string) *time.Time {
+	state, err := repo.FolderState(accountID, folder)
+	if err != nil || state == nil || state.LastSuccessfulRefresh == nil {
+		return nil
+	}
+	t := state.LastSuccessfulRefresh.UTC()
+	return &t
+}
+
+func policyAllowedUIDs(
+	ctx context.Context,
+	src source,
+	account *config.Account,
+	folder string,
+	uids []mail.UID,
+) ([]mail.UID, map[mail.UID]string, error) {
+	reasons := make(map[mail.UID]string, len(uids))
+	if len(uids) == 0 {
+		return nil, reasons, nil
+	}
+	if account.Policy != config.PolicyDomain {
+		out := append([]mail.UID(nil), uids...)
+		for _, uid := range out {
+			reasons[uid] = "policy_full"
+		}
+		return out, reasons, nil
+	}
+	headers, err := src.FetchHeaders(ctx, *account, folder, uids)
+	if err != nil {
+		return nil, nil, err
+	}
+	out := make([]mail.UID, 0, len(headers))
+	for _, header := range headers {
+		ok, reason := policy.DomainMatch(*account, mail.MessageEnvelope{
+			UID:  header.UID,
+			From: header.From,
+			To:   header.To,
+			Cc:   header.Cc,
+			Bcc:  header.Bcc,
+		})
+		if !ok {
+			continue
+		}
+		out = append(out, header.UID)
+		reasons[header.UID] = reason
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out, reasons, nil
 }
 
 func cachedUIDsAreCurrent(state *cache.FolderState, remote mail.RemoteFolderState) bool {
@@ -494,6 +550,9 @@ func remoteErrorCode(err error) string {
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
 		return remoteErrorCodePrefix + "timeout"
+	}
+	if errors.Is(err, mail.ErrSourceUnavailable) {
+		return "remote_source_unavailable"
 	}
 	return remoteErrorCodePrefix + "source_error"
 }

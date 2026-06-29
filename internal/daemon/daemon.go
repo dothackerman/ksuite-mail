@@ -47,12 +47,48 @@ type source interface {
 	SelectFolder(ctx context.Context, acct config.Account, folder string) (mail.RemoteFolderState, error)
 	SearchAllowed(ctx context.Context, acct config.Account, folder string, header string, value string, scope mail.UIDRange) ([]mail.UID, error)
 	ListUIDs(ctx context.Context, acct config.Account, folder string, scope mail.UIDRange) ([]mail.UID, error)
+	FetchHeaders(ctx context.Context, acct config.Account, folder string, uids []mail.UID) ([]mail.MessageHeaders, error)
 	FetchEnvelopes(ctx context.Context, acct config.Account, folder string, uids []mail.UID) ([]mail.MessageEnvelope, error)
 	FetchBodyPreview(ctx context.Context, acct config.Account, folder string, uid mail.UID, maxBytes int) (string, error)
 }
 
 // SourceFactory builds a source from runtime config.
 type SourceFactory func(ctx context.Context, cfg *config.Config) (source, error)
+
+// UnavailableSourceFactory keeps issue #3 production daemons explicit: read
+// routes exist for the CLI/API contract, but live IMAP is wired by the later
+// provider-probe slice.
+func UnavailableSourceFactory() SourceFactory {
+	return func(context.Context, *config.Config) (source, error) {
+		return unavailableSource{}, nil
+	}
+}
+
+type unavailableSource struct{}
+
+func (unavailableSource) SelectFolder(context.Context, config.Account, string) (mail.RemoteFolderState, error) {
+	return mail.RemoteFolderState{}, mail.ErrSourceUnavailable
+}
+
+func (unavailableSource) SearchAllowed(context.Context, config.Account, string, string, string, mail.UIDRange) ([]mail.UID, error) {
+	return nil, mail.ErrSourceUnavailable
+}
+
+func (unavailableSource) ListUIDs(context.Context, config.Account, string, mail.UIDRange) ([]mail.UID, error) {
+	return nil, mail.ErrSourceUnavailable
+}
+
+func (unavailableSource) FetchHeaders(context.Context, config.Account, string, []mail.UID) ([]mail.MessageHeaders, error) {
+	return nil, mail.ErrSourceUnavailable
+}
+
+func (unavailableSource) FetchEnvelopes(context.Context, config.Account, string, []mail.UID) ([]mail.MessageEnvelope, error) {
+	return nil, mail.ErrSourceUnavailable
+}
+
+func (unavailableSource) FetchBodyPreview(context.Context, config.Account, string, mail.UID, int) (string, error) {
+	return "", mail.ErrSourceUnavailable
+}
 
 // Options configures the daemon's view of the deployment.
 type Options struct {
@@ -366,6 +402,7 @@ func (s *Server) handleThread(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusInternalServerError, "internal_error", "could not read thread")
 		return
 	}
+	threadMessages = includeSeedMessage(threadMessages, seed, maxMessages)
 	results := make([]api.MessageSummary, 0, len(threadMessages))
 	for _, msg := range threadMessages {
 		results = append(results, toMessageSummary(msg))
@@ -566,6 +603,26 @@ func visibleThreadMessages(
 	return results, nil
 }
 
+func includeSeedMessage(messages []mail.CachedMessage, seed mail.CachedMessage, limit int) []mail.CachedMessage {
+	if limit <= 0 {
+		limit = defaultLimit
+	}
+	for _, msg := range messages {
+		if msg.ID == seed.ID {
+			return messages
+		}
+	}
+	out := make([]mail.CachedMessage, 0, min(limit, len(messages)+1))
+	out = append(out, seed)
+	for _, msg := range messages {
+		if len(out) >= limit {
+			break
+		}
+		out = append(out, msg)
+	}
+	return out
+}
+
 func boundedThreadContext(
 	cfg *config.Config,
 	seedID string,
@@ -643,7 +700,8 @@ func threadMessagesLoader(repo *cache.Repository, seed mail.CachedMessage) func(
 func readEnvelopeForScope(refreshRes refresh.Result, requestedAccount, requestedFolder string, localFound bool) (string, cache.RefreshMeta, []refresh.Warning) {
 	if !refreshRes.Partial || refreshAffectsScope(refreshRes.Warnings, requestedAccount, requestedFolder) {
 		warnings := warningsForScope(refreshRes.Warnings, requestedAccount, requestedFolder)
-		return api.ReadStatus(refreshRes.Meta, refreshRes.Partial, localFound), refreshRes.Meta, warnings
+		meta := scopedRefreshMeta(refreshRes.Meta, warnings)
+		return api.ReadStatus(meta, refreshRes.Partial, localFound), meta, warnings
 	}
 	meta := refreshRes.Meta
 	meta.RemoteOK = true
@@ -663,11 +721,22 @@ func readEnvelopeForMessages(refreshRes refresh.Result, messages []mail.CachedMe
 	}
 	if affected {
 		warnings := warningsForMessages(refreshRes.Warnings, messages)
-		return api.ReadStatus(refreshRes.Meta, refreshRes.Partial, true), refreshRes.Meta, warnings
+		meta := scopedRefreshMeta(refreshRes.Meta, warnings)
+		return api.ReadStatus(meta, refreshRes.Partial, true), meta, warnings
 	}
 	meta := refreshRes.Meta
 	meta.RemoteOK = true
 	return api.ReadStatus(meta, false, true), meta, nil
+}
+
+func scopedRefreshMeta(meta cache.RefreshMeta, warnings []refresh.Warning) cache.RefreshMeta {
+	if len(warnings) == 1 && warnings[0].LastSuccessfulRefreshAt != nil {
+		meta.LastSuccessfulRefreshAt = warnings[0].LastSuccessfulRefreshAt
+	}
+	if len(warnings) == 1 && warnings[0].LastSuccessfulRefreshAt == nil {
+		meta.LastSuccessfulRefreshAt = nil
+	}
+	return meta
 }
 
 func refreshAffectsScope(warnings []refresh.Warning, requestedAccount, requestedFolder string) bool {

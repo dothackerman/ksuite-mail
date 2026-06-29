@@ -24,6 +24,7 @@ type Source interface {
 	SelectFolder(ctx context.Context, acct config.Account, folder string) (RemoteFolderState, error)
 	SearchAllowed(ctx context.Context, acct config.Account, folder string, header string, value string, scope UIDRange) ([]UID, error)
 	ListUIDs(ctx context.Context, acct config.Account, folder string, scope UIDRange) ([]UID, error)
+	FetchHeaders(ctx context.Context, acct config.Account, folder string, uids []UID) ([]MessageHeaders, error)
 	FetchEnvelopes(ctx context.Context, acct config.Account, folder string, uids []UID) ([]MessageEnvelope, error)
 	FetchBodyPreview(ctx context.Context, acct config.Account, folder string, uid UID, maxBytes int) (string, error)
 }

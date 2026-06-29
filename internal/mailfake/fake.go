@@ -56,6 +56,7 @@ const (
 	methodSelect  = "select"
 	methodSearch  = "search"
 	methodList    = "list"
+	methodHeaders = "headers"
 	methodFetch   = "fetch"
 	methodPreview = "preview"
 )
@@ -342,7 +343,37 @@ func (a *Adapter) ListUIDs(_ context.Context, acct config.Account, folder string
 	return filterUIDRange(out, scope), nil
 }
 
-// FetchEnvelopes returns envelopes for selected UIDs.
+// FetchHeaders returns only the address headers needed for local policy
+// validation before content fetch.
+func (a *Adapter) FetchHeaders(_ context.Context, acct config.Account, folder string, uids []mail.UID) ([]mail.MessageHeaders, error) {
+	a.appendCall(methodHeaders, acct.ID, folder, "uids")
+	if err := a.checkFailure(methodHeaders, acct.ID, folder, ""); err != nil {
+		return nil, err
+	}
+	fd, ok := a.folder(acct, folder)
+	if !ok {
+		return nil, errors.New("folder not found: " + acct.ID + ":" + folder)
+	}
+	out := make([]mail.MessageHeaders, 0, len(uids))
+	for _, uid := range uids {
+		msg, ok := fd.Messages[uid]
+		if !ok {
+			continue
+		}
+		env := msg.Envelope
+		out = append(out, mail.MessageHeaders{
+			UID:  uid,
+			From: env.From,
+			To:   env.To,
+			Cc:   env.Cc,
+			Bcc:  env.Bcc,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].UID < out[j].UID })
+	return out, nil
+}
+
+// FetchEnvelopes returns envelopes for selected policy-approved UIDs.
 func (a *Adapter) FetchEnvelopes(_ context.Context, acct config.Account, folder string, uids []mail.UID) ([]mail.MessageEnvelope, error) {
 	a.appendCall(methodFetch, acct.ID, folder, "uids")
 	if err := a.checkFailure(methodFetch, acct.ID, folder, ""); err != nil {

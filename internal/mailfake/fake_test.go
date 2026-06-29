@@ -31,14 +31,15 @@ func TestAdapterRecordsSearchBeforeFetchOrder(t *testing.T) {
 	})
 	_, _ = a.SelectFolder(context.Background(), acct, "INBOX")
 	_, _ = a.SearchAllowed(context.Background(), acct, "INBOX", "From", "regenerativ.ch", mail.UIDRange{})
+	_, _ = a.FetchHeaders(context.Background(), acct, "INBOX", []mail.UID{1})
 	_, _ = a.FetchEnvelopes(context.Background(), acct, "INBOX", []mail.UID{1})
 
 	calls := a.CallsSnapshot()
-	if len(calls) != 3 {
-		t.Fatalf("calls = %d, want 3", len(calls))
+	if len(calls) != 4 {
+		t.Fatalf("calls = %d, want 4", len(calls))
 	}
-	if calls[1].Method != methodSearch || calls[2].Method != methodFetch {
-		t.Fatalf("expected search before fetch, got %#v -> %#v", calls[1].Method, calls[2].Method)
+	if calls[1].Method != methodSearch || calls[2].Method != methodHeaders || calls[3].Method != methodFetch {
+		t.Fatalf("expected search before headers before fetch, got %#v", calls)
 	}
 }
 

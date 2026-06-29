@@ -558,6 +558,55 @@ func TestReadListWarningPropagatesOnRefreshFailure(t *testing.T) {
 	}
 }
 
+func TestReadListScopesStaleRefreshTimestampToFailedFolder(t *testing.T) {
+	adapter := mailfake.NewAdapter(map[string]map[string][]mailfake.Message{
+		"acct": {
+			"INBOX": {},
+			"Sent": {
+				{
+					UID: 2,
+					Envelope: mail.MessageEnvelope{
+						UID:     2,
+						Subject: "sent",
+						From:    "alice@example.com",
+						To:      "bob@example.com",
+					},
+					Body: "sent",
+				},
+			},
+		},
+	})
+	adapter.SetFailure("select", "acct", "INBOX", "", fmt.Errorf("inbox down"))
+	opts := deploymentWithSource(t, validFullConfig, adapter)
+	old := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
+	seedDaemonCache(t, opts.StateDir, cachedForDaemon(mail.PublicID("acct", "INBOX", 123, 1), "thread", "alice@example.com", old, 1))
+	seedDaemonFolderState(t, opts.StateDir, cache.FolderState{
+		AccountID:             "acct",
+		Folder:                "INBOX",
+		UIDVALIDITY:           123,
+		UIDNEXT:               2,
+		LastSeenUID:           1,
+		PolicyFingerprint:     "full:",
+		LastSuccessfulRefresh: &old,
+	})
+	ts := newLocalHTTPServer(t, opts)
+	defer ts.Close()
+
+	res := postJSON(t, ts.Client(), ts.URL+"/v1/list", map[string]any{"account": "acct", "folder": "INBOX"})
+	defer func() { _ = res.Body.Close() }()
+	env := decodeEnvelopeBody(t, res.Body)
+	if env.Status != api.StatusOKStale {
+		t.Fatalf("status = %q, want %q", env.Status, api.StatusOKStale)
+	}
+	var got api.ListResponse
+	if err := env.DecodeResult(&got); err != nil {
+		t.Fatalf("decode list response: %v", err)
+	}
+	if got.Refresh.LastSuccessfulRefreshAt == nil || !got.Refresh.LastSuccessfulRefreshAt.Equal(old) {
+		t.Fatalf("refresh timestamp = %v, want failed INBOX timestamp %v", got.Refresh.LastSuccessfulRefreshAt, old)
+	}
+}
+
 func TestReadThreadMarksStaleWhenAnyReturnedFolderFailed(t *testing.T) {
 	adapter := mailfake.NewAdapter(map[string]map[string][]mailfake.Message{
 		"acct": {
@@ -1195,6 +1244,30 @@ func TestReadThreadAppliesLimitAfterPolicy(t *testing.T) {
 	}
 }
 
+func TestReadThreadKeepsRequestedSeedWhenBounded(t *testing.T) {
+	adapter := mailfake.NewAdapter(map[string]map[string][]mailfake.Message{"acct": {"INBOX": {}, "Sent": {}}})
+	adapter.SetFailure("select", "acct", "INBOX", "", fmt.Errorf("remote down"))
+	opts := deploymentWithSource(t, validFullConfig, adapter)
+	now := time.Now().UTC()
+	seedDaemonCache(t, opts.StateDir,
+		cachedForDaemon("msg_newer", "thread-1", "alice@example.com", now, 1),
+		cachedForDaemon("msg_seed", "thread-1", "alice@example.com", now.Add(-time.Hour), 2),
+	)
+	ts := newLocalHTTPServer(t, opts)
+	defer ts.Close()
+
+	res := postJSON(t, ts.Client(), ts.URL+"/v1/thread", map[string]any{"id": "msg_seed", "max_messages": 1})
+	defer func() { _ = res.Body.Close() }()
+	env := decodeEnvelopeBody(t, res.Body)
+	var got api.ThreadResponse
+	if err := env.DecodeResult(&got); err != nil {
+		t.Fatalf("decode thread response: %v", err)
+	}
+	if len(got.Messages) != 1 || got.Messages[0].ID != "msg_seed" {
+		t.Fatalf("thread messages = %#v, want requested seed within bound", got.Messages)
+	}
+}
+
 func TestReadThreadWithEmptyThreadKeyReturnsOnlySeedMessage(t *testing.T) {
 	adapter := mailfake.NewAdapter(map[string]map[string][]mailfake.Message{"acct": {"INBOX": {}, "Sent": {}}})
 	adapter.SetFailure("select", "acct", "INBOX", "", fmt.Errorf("remote down"))
@@ -1283,6 +1356,18 @@ func seedDaemonCache(t *testing.T, stateDir string, messages ...mail.CachedMessa
 		if err := repo.UpsertMessage(msg); err != nil {
 			t.Fatalf("UpsertMessage(%s): %v", msg.ID, err)
 		}
+	}
+}
+
+func seedDaemonFolderState(t *testing.T, stateDir string, state cache.FolderState) {
+	t.Helper()
+	repo, err := cache.NewRepository(cache.DBOptions{Path: filepath.Join(stateDir, "mail.db")})
+	if err != nil {
+		t.Fatalf("NewRepository: %v", err)
+	}
+	defer func() { _ = repo.Close() }()
+	if err := repo.UpsertFolderState(state); err != nil {
+		t.Fatalf("UpsertFolderState(%s/%s): %v", state.AccountID, state.Folder, err)
 	}
 }
 
