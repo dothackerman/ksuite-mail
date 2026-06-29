@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/dothackerman/ksuite-mail/internal/api"
 )
@@ -57,5 +58,35 @@ func TestEmptyOptionalFieldsAreOmitted(t *testing.T) {
 	}
 	if !strings.Contains(s, `"status":"ok"`) {
 		t.Fatalf("status missing from %s", s)
+	}
+}
+
+func TestReadStatusMapsRemoteFallbackToStale(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	meta := api.RefreshMeta{
+		Attempted:               true,
+		RemoteOK:                false,
+		LastSuccessfulRefreshAt: &now,
+	}
+	if got := api.ReadStatus(meta, false, true); got != api.StatusOKStale {
+		t.Fatalf("ReadStatus = %q, want %q", got, api.StatusOKStale)
+	}
+	if got := api.ReadStatus(meta, false, false); got != api.StatusError {
+		t.Fatalf("ReadStatus no local = %q, want %q", got, api.StatusError)
+	}
+}
+
+func TestOKWithStatusHonorsWarnings(t *testing.T) {
+	env, err := api.OKWithStatus(api.StatusOKStale, api.ListResponse{
+		Refresh: api.RefreshMeta{Attempted: true},
+	}, api.Warning{Code: "remote_source_error", Message: "simulated"})
+	if err != nil {
+		t.Fatalf("OKWithStatus: %v", err)
+	}
+	if env.Status != api.StatusOKStale {
+		t.Fatalf("status = %q, want %q", env.Status, api.StatusOKStale)
+	}
+	if len(env.Warnings) != 1 || env.Warnings[0].Code != "remote_source_error" {
+		t.Fatalf("warning = %#v", env.Warnings)
 	}
 }

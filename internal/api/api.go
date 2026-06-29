@@ -17,6 +17,9 @@ package api
 import (
 	"encoding/json"
 	"fmt"
+	"time"
+
+	"github.com/dothackerman/ksuite-mail/internal/cache"
 )
 
 // Allowed high-level envelope statuses (NFR-ERR-002).
@@ -98,4 +101,130 @@ type DoctorReport struct {
 // HealthInfo is the payload of GET /v1/health: a liveness signal only.
 type HealthInfo struct {
 	Status string `json:"status"`
+}
+
+// RefreshMeta mirrors cache refresh status for command responses.
+type RefreshMeta = cache.RefreshMeta
+
+// MessageSummary is a compact, account-safe cache read payload.
+type MessageSummary struct {
+	ID            string    `json:"id"`
+	Account       string    `json:"account"`
+	Folder        string    `json:"folder"`
+	Subject       string    `json:"subject"`
+	From          string    `json:"from"`
+	To            string    `json:"to"`
+	Cc            string    `json:"cc"`
+	Flags         string    `json:"flags"`
+	ThreadKey     string    `json:"thread_key"`
+	Date          time.Time `json:"date"`
+	Snippet       string    `json:"snippet"`
+	VisibleReason string    `json:"visible_reason"`
+}
+
+// MessageDetail adds preview text to MessageSummary.
+type MessageDetail struct {
+	MessageSummary
+	BodyText        string `json:"body"`
+	HasAttachments  bool   `json:"has_attachments"`
+	ContentTypeHint string `json:"content_type_hint,omitempty"`
+}
+
+// ListRequest defines /v1/list payload.
+type ListRequest struct {
+	Account string `json:"account"`
+	Folder  string `json:"folder"`
+	Limit   int    `json:"limit"`
+	Offset  int    `json:"offset"`
+}
+
+// SearchRequest defines /v1/search payload.
+type SearchRequest struct {
+	Account string `json:"account"`
+	Folder  string `json:"folder"`
+	Query   string `json:"query"`
+	Limit   int    `json:"limit"`
+	Offset  int    `json:"offset"`
+}
+
+// ShowRequest defines /v1/show payload.
+type ShowRequest struct {
+	ID       string `json:"id"`
+	Preview  bool   `json:"preview"`
+	MaxChars int    `json:"max_chars"`
+}
+
+// ThreadRequest defines /v1/thread payload.
+type ThreadRequest struct {
+	ID          string `json:"id"`
+	Brief       bool   `json:"brief"`
+	MaxMessages int    `json:"max_messages"`
+}
+
+// ContextRequest defines /v1/context payload.
+type ContextRequest struct {
+	ID     string `json:"id"`
+	Budget int    `json:"budget"`
+}
+
+// ListResponse is returned by /v1/list.
+type ListResponse struct {
+	Results []MessageSummary `json:"results"`
+	Refresh RefreshMeta      `json:"refresh"`
+}
+
+// SearchResponse is returned by /v1/search.
+type SearchResponse struct {
+	Results []MessageSummary `json:"results"`
+	Refresh RefreshMeta      `json:"refresh"`
+}
+
+// ShowResponse is returned by /v1/show.
+type ShowResponse struct {
+	Result  MessageDetail `json:"result"`
+	Refresh RefreshMeta   `json:"refresh"`
+}
+
+// ThreadResponse is returned by /v1/thread.
+type ThreadResponse struct {
+	ThreadKey string           `json:"thread_key"`
+	Messages  []MessageSummary `json:"messages"`
+	Refresh   RefreshMeta      `json:"refresh"`
+}
+
+// ContextResponse is returned by /v1/context.
+type ContextResponse struct {
+	Seed          MessageDetail    `json:"seed"`
+	Timeline      []MessageSummary `json:"timeline"`
+	Refresh       RefreshMeta      `json:"refresh"`
+	MessageBudget int              `json:"message_budget"`
+}
+
+// ReadStatus determines which top-level status applies to read responses.
+func ReadStatus(meta cache.RefreshMeta, partial bool, localFound bool) string {
+	if partial {
+		if localFound {
+			return StatusOKStale
+		}
+		return StatusError
+	}
+	if meta.Attempted && !meta.RemoteOK {
+		if localFound {
+			return StatusOKStale
+		}
+		return StatusError
+	}
+	return StatusOK
+}
+
+// OKWithStatus builds a success envelope with a custom top-level status.
+func OKWithStatus(status string, result any, warnings ...Warning) (Envelope, error) {
+	if status == "" {
+		status = StatusOK
+	}
+	raw, err := json.Marshal(result)
+	if err != nil {
+		return Envelope{}, fmt.Errorf("encode result: %w", err)
+	}
+	return Envelope{Status: status, Result: raw, Warnings: warnings}, nil
 }

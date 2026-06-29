@@ -3,12 +3,15 @@
 package e2e
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -41,7 +44,41 @@ func build(t *testing.T, root, pkg, out string) string {
 	return bin
 }
 
-func waitForSocket(t *testing.T, sock string) {
+type daemonRun struct {
+	cmd    *exec.Cmd
+	done   chan error
+	stderr *bytes.Buffer
+}
+
+func startDaemon(t *testing.T, cmd *exec.Cmd) *daemonRun {
+	t.Helper()
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start daemon: %v", err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- cmd.Wait()
+		close(done)
+	}()
+	t.Cleanup(func() {
+		if cmd.Process == nil {
+			return
+		}
+		_ = cmd.Process.Signal(os.Interrupt)
+		select {
+		case <-done:
+			return
+		case <-time.After(1 * time.Second):
+			_ = cmd.Process.Kill()
+		}
+		<-done
+	})
+	return &daemonRun{cmd: cmd, done: done, stderr: &stderr}
+}
+
+func waitForSocket(t *testing.T, sock string, daemon *daemonRun) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
@@ -49,9 +86,78 @@ func waitForSocket(t *testing.T, sock string) {
 			_ = c.Close()
 			return
 		}
+		if !daemonIsRunning(daemon) {
+			if isSocketPermissionDenied(daemon.stderr.String(), "") {
+				t.Skipf("daemon startup denied by environment")
+			}
+			_ = daemonWaitForErr(daemon)
+			t.Fatalf("daemon exited before socket became reachable")
+		}
 		time.Sleep(20 * time.Millisecond)
 	}
+	if !daemonIsRunning(daemon) {
+		if isSocketPermissionDenied(daemon.stderr.String(), "") {
+			t.Skipf("daemon startup denied by environment")
+		}
+		_ = daemonWaitForErr(daemon)
+		t.Fatalf("daemon exited before socket became reachable")
+	}
 	t.Fatalf("daemon socket %s never became reachable", sock)
+}
+
+func daemonIsRunning(daemon *daemonRun) bool {
+	if daemon == nil || daemon.cmd == nil || daemon.cmd.Process == nil {
+		return false
+	}
+	return daemon.cmd.Process.Signal(syscall.Signal(0)) == nil
+}
+
+func daemonWaitForErr(daemon *daemonRun) error {
+	if daemon == nil {
+		return nil
+	}
+	select {
+	case err := <-daemon.done:
+		return err
+	default:
+		return nil
+	}
+}
+
+func TestDaemonDoneRemainsReadableAfterWaitForErr(t *testing.T) {
+	cmd := exec.Command("sh", "-c", "exit 7")
+	daemon := startDaemon(t, cmd)
+	deadline := time.Now().Add(2 * time.Second)
+	var waitErr error
+	for time.Now().Before(deadline) {
+		waitErr = daemonWaitForErr(daemon)
+		if waitErr != nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if waitErr == nil {
+		t.Fatalf("daemon did not exit before deadline")
+	}
+	var exitErr *exec.ExitError
+	if !errors.As(waitErr, &exitErr) {
+		t.Fatalf("daemonWaitForErr returned %T, want *exec.ExitError", waitErr)
+	}
+	select {
+	case <-daemon.done:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatalf("daemon done channel blocked after daemonWaitForErr consumed exit")
+	}
+}
+
+func isSocketPermissionDenied(stderrText, errText string) bool {
+	if strings.Contains(stderrText, "operation not permitted") {
+		return true
+	}
+	if strings.Contains(errText, "operation not permitted") {
+		return true
+	}
+	return false
 }
 
 // exitCode extracts the process exit code from an *exec.ExitError, or fails.
@@ -102,15 +208,8 @@ func TestDoctorEndToEnd(t *testing.T) {
 
 	daemonCmd := exec.Command(daemonBin,
 		"--config", cfgPath, "--secrets", secPath, "--state-dir", stateDir, "--socket", sock)
-	daemonCmd.Stderr = os.Stderr
-	if err := daemonCmd.Start(); err != nil {
-		t.Fatalf("start daemon: %v", err)
-	}
-	t.Cleanup(func() {
-		_ = daemonCmd.Process.Signal(os.Interrupt)
-		_, _ = daemonCmd.Process.Wait()
-	})
-	waitForSocket(t, sock)
+	run := startDaemon(t, daemonCmd)
+	waitForSocket(t, sock, run)
 
 	out, err := exec.Command(cli, "doctor", "--socket", sock).Output()
 	if code := exitCode(t, err); code != 0 {

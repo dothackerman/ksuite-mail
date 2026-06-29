@@ -50,10 +50,11 @@ func main() {
 	defer stop()
 
 	srv := daemon.New(daemon.Options{
-		ConfigPath:  *configPath,
-		SecretsPath: *secretsPath,
-		StateDir:    *stateDir,
-		Logger:      log,
+		ConfigPath:    *configPath,
+		SecretsPath:   *secretsPath,
+		StateDir:      *stateDir,
+		Logger:        log,
+		SourceFactory: daemon.UnavailableSourceFactory(),
 	})
 	if err := srv.Serve(ctx, ln); err != nil {
 		log.Error("daemon stopped with error", "err", err)

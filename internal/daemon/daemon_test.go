@@ -3,12 +3,15 @@ package daemon_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -59,8 +62,31 @@ func decodeEnvelope(t *testing.T, body io.Reader) api.Envelope {
 	return env
 }
 
+func newLocalHTTPServer(t *testing.T, opts daemon.Options) *httptest.Server {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		if errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.EACCES) || strings.Contains(err.Error(), "operation not permitted") {
+			t.Skipf("HTTP test listener denied by environment: %v", err)
+		}
+		t.Fatalf("listen local tcp: %v", err)
+	}
+	ts := httptest.NewUnstartedServer(daemon.New(opts).Handler())
+	ts.Listener = ln
+	ts.Start()
+	return ts
+}
+
+func skipIfSocketListenerUnsupported(t *testing.T, err error) {
+	t.Helper()
+	if errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.EACCES) || strings.Contains(err.Error(), "operation not permitted") {
+		t.Skipf("unix socket listener denied by environment: %v", err)
+	}
+	t.Fatalf("Listen: %v", err)
+}
+
 func TestHealthEndpointReportsLiveness(t *testing.T) {
-	ts := httptest.NewServer(daemon.New(healthyDeployment(t)).Handler())
+	ts := newLocalHTTPServer(t, healthyDeployment(t))
 	defer ts.Close()
 
 	resp, err := http.Get(ts.URL + "/v1/health")
@@ -82,7 +108,7 @@ func TestHealthEndpointReportsLiveness(t *testing.T) {
 }
 
 func TestDoctorEndpointReturnsReport(t *testing.T) {
-	ts := httptest.NewServer(daemon.New(healthyDeployment(t)).Handler())
+	ts := newLocalHTTPServer(t, healthyDeployment(t))
 	defer ts.Close()
 
 	resp, err := http.Post(ts.URL+"/v1/doctor", "application/json", nil)
@@ -104,7 +130,7 @@ func TestDoctorEndpointReturnsReport(t *testing.T) {
 }
 
 func TestWrongMethodIsRejected(t *testing.T) {
-	ts := httptest.NewServer(daemon.New(healthyDeployment(t)).Handler())
+	ts := newLocalHTTPServer(t, healthyDeployment(t))
 	defer ts.Close()
 
 	cases := []struct {
@@ -131,7 +157,7 @@ func TestWrongMethodIsRejected(t *testing.T) {
 }
 
 func TestUnknownPathReturnsErrorEnvelope(t *testing.T) {
-	ts := httptest.NewServer(daemon.New(healthyDeployment(t)).Handler())
+	ts := newLocalHTTPServer(t, healthyDeployment(t))
 	defer ts.Close()
 
 	resp, err := http.Get(ts.URL + "/v1/nope")
@@ -151,7 +177,7 @@ func TestServeOverUnixSocketAndCleanUp(t *testing.T) {
 	sock := filepath.Join(t.TempDir(), "d.sock")
 	ln, fromSystemd, err := daemon.Listen(sock)
 	if err != nil {
-		t.Fatalf("Listen: %v", err)
+		skipIfSocketListenerUnsupported(t, err)
 	}
 	if fromSystemd {
 		t.Fatalf("expected path listener, not systemd activation")
