@@ -238,6 +238,16 @@ func TestReadCommandClientTimeoutMatchesReadContext(t *testing.T) {
 	}
 }
 
+func TestProbeCommandClientTimeoutMatchesProbeContext(t *testing.T) {
+	client := udsclient.NewWithTimeout("unused.sock", probeCommandTimeout)
+	if got := client.Timeout(); got != probeCommandTimeout {
+		t.Fatalf("probe client timeout = %s, want %s", got, probeCommandTimeout)
+	}
+	if probeCommandTimeout != 20*time.Second {
+		t.Fatalf("probe command timeout = %s, want 20s", probeCommandTimeout)
+	}
+}
+
 type capturedReadRequest struct {
 	path string
 	body map[string]any

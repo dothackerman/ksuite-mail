@@ -38,6 +38,14 @@ const (
 	CheckSkip = "skip"
 )
 
+// Provider probe aggregate statuses and per-check outcomes.
+const (
+	ProbeStatusPassed        = "passed"
+	ProbeStatusFailed        = "failed"
+	ProbeStatusInconclusive  = "inconclusive"
+	ProbeStatusNotApplicable = "not_applicable"
+)
+
 // Warning is a non-fatal, safe-to-display advisory.
 type Warning struct {
 	Code    string `json:"code"`
@@ -211,13 +219,14 @@ type ContextResponse struct {
 // error text, message content, headers, subjects, bodies, or attachment names.
 type ProbeIMAPResponse struct {
 	Account string       `json:"account"`
+	Status  string       `json:"status"`
 	Checks  []ProbeCheck `json:"checks"`
 }
 
 // ProbeCheck is one fixed provider-probe checklist outcome. Status values are
-// stable strings such as pass, fail, inconclusive, and not_applicable.
+// stable strings such as passed, failed, inconclusive, and not_applicable.
 type ProbeCheck struct {
-	Name   string `json:"name"`
+	ID     string `json:"id"`
 	Status string `json:"status"`
 	Code   string `json:"code,omitempty"`
 	Detail string `json:"detail,omitempty"`

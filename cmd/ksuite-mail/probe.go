@@ -14,6 +14,8 @@ import (
 	"github.com/dothackerman/ksuite-mail/internal/udsclient"
 )
 
+const probeCommandTimeout = 20 * time.Second
+
 func runProbe(args []string) int {
 	if len(args) == 0 {
 		return probeValidationError("probe target is required")
@@ -47,10 +49,10 @@ func runProbeIMAP(args []string) int {
 		return probeValidationError("account is required")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), probeCommandTimeout)
 	defer cancel()
 
-	env, err := udsclient.New(*socket).ProbeIMAP(ctx, api.ProbeIMAPRequest{Account: accountRef})
+	env, err := udsclient.NewWithTimeout(*socket, probeCommandTimeout).ProbeIMAP(ctx, api.ProbeIMAPRequest{Account: accountRef})
 	if err != nil {
 		if errors.Is(err, udsclient.ErrUnreachable) {
 			emitJSON(api.Err("daemon_unreachable",

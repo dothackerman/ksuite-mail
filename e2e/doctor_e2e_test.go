@@ -285,8 +285,9 @@ func TestProbeIMAPEndToEnd(t *testing.T) {
 		Status string `json:"status"`
 		Result struct {
 			Account string `json:"account"`
+			Status  string `json:"status"`
 			Checks  []struct {
-				Name   string `json:"name"`
+				ID     string `json:"id"`
 				Status string `json:"status"`
 			} `json:"checks"`
 		} `json:"result"`
@@ -294,11 +295,19 @@ func TestProbeIMAPEndToEnd(t *testing.T) {
 	if err := json.Unmarshal(out, &env); err != nil {
 		t.Fatalf("parse probe JSON: %v\noutput: %s", err, out)
 	}
-	if env.Status != "ok" || env.Result.Account != "rs_info" {
+	if env.Status != "ok" || env.Result.Account != "rs_info" || env.Result.Status != "inconclusive" {
 		t.Fatalf("unexpected probe response: %s", out)
 	}
 	if len(env.Result.Checks) == 0 {
 		t.Fatalf("probe response had no checks: %s", out)
+	}
+	for _, check := range env.Result.Checks {
+		if check.ID == "" {
+			t.Fatalf("probe check had no stable id: %s", out)
+		}
+		if check.Status == "pass" || check.Status == "fail" {
+			t.Fatalf("probe check used legacy status vocabulary: %s", out)
+		}
 	}
 }
 

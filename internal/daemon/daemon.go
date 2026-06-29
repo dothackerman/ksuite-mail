@@ -28,6 +28,7 @@ import (
 	"github.com/dothackerman/ksuite-mail/internal/mail"
 	"github.com/dothackerman/ksuite-mail/internal/policy"
 	"github.com/dothackerman/ksuite-mail/internal/refresh"
+	"github.com/dothackerman/ksuite-mail/internal/secrets"
 )
 
 // systemdListenFDStart is the first file descriptor systemd passes to a
@@ -202,6 +203,10 @@ func (s *Server) handleProbeIMAP(w http.ResponseWriter, r *http.Request) {
 	acct := accountByID(cfg, accountRef)
 	if acct == nil {
 		s.writeError(w, http.StatusNotFound, "unknown_account", "account not found")
+		return
+	}
+	if err := s.verifyProbeCredential(*acct); err != nil {
+		s.writeError(w, http.StatusFailedDependency, probeCredentialErrorCode(err), "selected account credential is unavailable")
 		return
 	}
 
@@ -1142,60 +1147,103 @@ func accountByID(cfg *config.Config, id string) *config.Account {
 	return nil
 }
 
+var errProbeCredentialMissing = errors.New("probe credential missing")
+
+func (s *Server) verifyProbeCredential(acct config.Account) error {
+	store, err := secrets.Load(s.opts.SecretsPath)
+	if err != nil {
+		return err
+	}
+	if _, ok := store.Resolve(acct.PasswordRef.ID); !ok {
+		return errProbeCredentialMissing
+	}
+	return nil
+}
+
+func probeCredentialErrorCode(err error) string {
+	switch {
+	case errors.Is(err, errProbeCredentialMissing):
+		return "credential_missing"
+	case errors.Is(err, os.ErrNotExist):
+		return "secrets_missing"
+	case errors.Is(err, secrets.ErrUnsafePermissions):
+		return "secrets_unsafe_permissions"
+	case errors.Is(err, secrets.ErrUnsupportedVersion):
+		return "secrets_bad_version"
+	case errors.Is(err, secrets.ErrMalformed):
+		return "secrets_malformed"
+	default:
+		return "secrets_unreadable"
+	}
+}
+
 func stubProbeIMAPResponse(acct config.Account) api.ProbeIMAPResponse {
 	checks := []api.ProbeCheck{
 		{
-			Name:   "account_selection",
-			Status: "pass",
+			ID:     "account_selection",
+			Status: api.ProbeStatusPassed,
 			Code:   "configured_account",
 			Detail: "selected an existing daemon-side account",
 		},
 		{
-			Name:   "fixed_checklist",
-			Status: "pass",
+			ID:     "fixed_checklist",
+			Status: api.ProbeStatusPassed,
 			Code:   "escape_hatch_unavailable",
 			Detail: "probe uses the fixed daemon-side checklist contract",
 		},
 		{
-			Name:   "capability",
-			Status: "inconclusive",
+			ID:     "capability",
+			Status: api.ProbeStatusInconclusive,
 			Code:   "live_probe_not_implemented",
 			Detail: "live provider probing is deferred to the provider implementation slice",
 		},
 		{
-			Name:   "folder_listing",
-			Status: "inconclusive",
+			ID:     "folder_listing",
+			Status: api.ProbeStatusInconclusive,
 			Code:   "live_probe_not_implemented",
 			Detail: "live provider probing is deferred to the provider implementation slice",
 		},
 		{
-			Name:   "uid_behavior",
-			Status: "inconclusive",
+			ID:     "uid_behavior",
+			Status: api.ProbeStatusInconclusive,
 			Code:   "live_probe_not_implemented",
 			Detail: "live provider probing is deferred to the provider implementation slice",
 		},
 		{
-			Name:   "read_state",
-			Status: "inconclusive",
+			ID:     "read_state",
+			Status: api.ProbeStatusInconclusive,
 			Code:   "live_probe_not_implemented",
 			Detail: "live provider probing is deferred to the provider implementation slice",
 		},
 	}
-	domainStatus := "inconclusive"
+	domainStatus := api.ProbeStatusInconclusive
 	domainCode := "live_probe_not_implemented"
 	domainDetail := "live provider probing is deferred to the provider implementation slice"
 	if acct.Policy == config.PolicyFull {
-		domainStatus = "not_applicable"
+		domainStatus = api.ProbeStatusNotApplicable
 		domainCode = "full_policy"
 		domainDetail = "full-policy accounts do not depend on domain-header filtering"
 	}
 	checks = append(checks, api.ProbeCheck{
-		Name:   "domain_header_search",
+		ID:     "domain_header_search",
 		Status: domainStatus,
 		Code:   domainCode,
 		Detail: domainDetail,
 	})
-	return api.ProbeIMAPResponse{Account: acct.ID, Checks: checks}
+	return api.ProbeIMAPResponse{Account: acct.ID, Status: aggregateProbeStatus(checks), Checks: checks}
+}
+
+func aggregateProbeStatus(checks []api.ProbeCheck) string {
+	status := api.ProbeStatusPassed
+	for _, check := range checks {
+		switch check.Status {
+		case api.ProbeStatusFailed:
+			return api.ProbeStatusFailed
+		case api.ProbeStatusInconclusive:
+			status = api.ProbeStatusInconclusive
+		}
+	}
+	return status
 }
 
 func toMessageSummary(m mail.CachedMessage) api.MessageSummary {
