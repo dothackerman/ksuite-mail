@@ -208,7 +208,31 @@ POST /v1/show
 POST /v1/thread
 POST /v1/context
 POST /v1/doctor
+POST /v1/probe/imap
 ```
+
+`POST /v1/probe/imap` accepts a compact JSON request with the mandatory selected account reference:
+
+```json
+{ "account": "<account-ref>" }
+```
+
+The response is sanitized structured diagnostics for the fixed provider checklist:
+
+```json
+{
+  "account": "<account-ref>",
+  "status": "passed|failed|inconclusive",
+  "checks": [
+    {
+      "id": "domain_header_search",
+      "status": "passed|failed|inconclusive|not_applicable"
+    }
+  ]
+}
+```
+
+`POST /v1/doctor` remains a setup and health diagnostic endpoint. It must not run the live provider probe.
 
 ## 6. Runtime View
 
@@ -307,6 +331,8 @@ human or implementation agent
 The probe is a diagnostic checklist. It is not a raw IMAP command endpoint.
 
 The CLI is only the view over the daemon response. It must not own provider probing logic, credential resolution, folder discovery, fixture evaluation, or IMAP behavior decisions.
+
+Domain-header search checks apply only to `domain` policy accounts with configured domains. For `full` policy accounts, the daemon returns `not_applicable` for those checks because full-policy access does not depend on domain-scoped filtering.
 
 ## 7. Deployment View
 

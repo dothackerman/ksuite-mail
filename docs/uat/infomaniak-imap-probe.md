@@ -18,6 +18,8 @@ The account reference is mandatory. The command must not infer a default account
 
 The CLI is only the view over the daemon response. It must not own provider probing logic, credential resolution, folder discovery, fixture evaluation, or IMAP behavior decisions.
 
+Domain-header search checks run only for `policy = "domain"` accounts with configured domains. For `policy = "full"` accounts, those checks must return `not_applicable`; capability, folder, UID, and read-state checks may still run.
+
 ## Required Fixture Coverage
 
 The useful fixture set contains:
@@ -30,6 +32,8 @@ The useful fixture set contains:
 - enough UID spacing to test UID range search behavior
 
 If a fixture is missing, affected checks must return `inconclusive`; they must not claim provider support or lack of support.
+
+`not_applicable` is reserved for checks that do not apply to the selected account policy. Missing fixtures for an applicable domain-policy check must return `inconclusive`, not `not_applicable`.
 
 ## Scenarios
 
@@ -87,6 +91,7 @@ Expected behavior:
 - The probe checks `UID SEARCH HEADER Cc <domain>`.
 - The probe checks `UID SEARCH HEADER Bcc <domain>` when available.
 - Matching behavior is reported through safe counts, booleans, and `inconclusive` where fixtures are missing.
+- For `policy = "full"` accounts, domain-header checks are reported as `not_applicable`.
 - The non-matching fixture remains invisible.
 
 Outcome:

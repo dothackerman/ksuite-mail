@@ -428,6 +428,8 @@ Probe output must use safe structured diagnostics such as booleans, counts, capa
 
 Behavior checks must use a controlled test account or folder when the answer depends on message content or folder state.
 
+Domain-header search behavior checks apply to `domain` policy accounts with configured domains. For `full` policy accounts, those checks must return `not_applicable` because full-policy access does not depend on domain-scoped filtering.
+
 Minimum useful fixture coverage:
 
 - a message whose `From` matches a configured domain

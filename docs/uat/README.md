@@ -96,6 +96,7 @@ Local-only path: .uat-runs/<run-id>/
 ## Privacy Check
 
 - [ ] No credentials
+- [ ] No email addresses unless public test fixture addresses
 - [ ] No email subjects or bodies
 - [ ] No raw headers
 - [ ] No attachment names
