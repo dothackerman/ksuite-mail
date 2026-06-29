@@ -208,7 +208,31 @@ POST /v1/show
 POST /v1/thread
 POST /v1/context
 POST /v1/doctor
+POST /v1/probe/imap
 ```
+
+`POST /v1/probe/imap` accepts a compact JSON request with the mandatory selected account reference:
+
+```json
+{ "account": "<account-ref>" }
+```
+
+The response is sanitized structured diagnostics for the fixed provider checklist:
+
+```json
+{
+  "account": "<account-ref>",
+  "status": "passed|failed|inconclusive",
+  "checks": [
+    {
+      "id": "domain_header_search",
+      "status": "passed|failed|inconclusive|not_applicable"
+    }
+  ]
+}
+```
+
+`POST /v1/doctor` remains a setup and health diagnostic endpoint. It must not run the live provider probe.
 
 ## 6. Runtime View
 
@@ -265,6 +289,8 @@ user
   -> daemon returns diagnostics without secrets
 ```
 
+`doctor` is focused on local setup and health diagnostics. Live provider compatibility probing is handled by the fixed provider probe flow.
+
 ### ARCH-RUN-005 Offline Or Remote Failure
 
 ```text
@@ -295,14 +321,18 @@ human
 
 ```text
 human or implementation agent
-  -> ksuite-mail doctor --imap-probe --json
+  -> ksuite-mail probe imap --account <account-ref> --json
   -> CLI sends fixed probe request over UDS
-  -> daemon resolves credentials internally
-  -> daemon runs fixed Infomaniak IMAP checklist
+  -> daemon resolves the existing account and credentials internally
+  -> daemon runs fixed Infomaniak IMAP checklist for the selected account
   -> daemon returns sanitized capability and behavior diagnostics
 ```
 
 The probe is a diagnostic checklist. It is not a raw IMAP command endpoint.
+
+The CLI is only the view over the daemon response. It must not own provider probing logic, credential resolution, folder discovery, fixture evaluation, or IMAP behavior decisions.
+
+Domain-header search checks apply only to `domain` policy accounts with configured domains. For `full` policy accounts, the daemon returns `not_applicable` for those checks because full-policy access does not depend on domain-scoped filtering.
 
 ## 7. Deployment View
 
@@ -454,6 +484,8 @@ Use protobuf/gRPC only if stronger generated schemas, streaming, multiple non-CL
 ### ARCH-CON-007 Provider Probe Boundary
 
 Provider probing must stay daemon-side and credential-safe.
+
+The probe target is a mandatory account reference to an existing configured account. The daemon must not infer a default account, accept credentials from the CLI, or create test-only account registration paths for probing.
 
 The probe may return:
 
