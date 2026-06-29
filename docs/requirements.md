@@ -228,13 +228,14 @@ Actor: local human user or implementation agent through the local CLI.
 Command:
 
 ```bash
-ksuite-mail doctor --imap-probe --json
+ksuite-mail probe imap --account <account-ref> --json
 ```
 
 Result:
 
 - The CLI talks to the daemon through the Unix socket.
-- The daemon resolves credentials internally and probes Infomaniak IMAP behavior.
+- The account reference names an existing daemon-side account configuration and is mandatory.
+- The daemon resolves credentials internally and probes Infomaniak IMAP behavior for that account.
 - The probe returns sanitized capability, folder, extension, and behavior diagnostics.
 - The probe does not expose credentials, raw IMAP command execution, message subjects, message bodies, raw headers, attachment names, or arbitrary provider text.
 
@@ -386,6 +387,7 @@ First version must support read-only mail operations only:
 - thread
 - context
 - doctor
+- probe
 
 Setup operations such as `init` may create local users, files, directories, and systemd units, but must not mutate remote mailbox content.
 
@@ -403,6 +405,10 @@ When a configured folder is refreshed:
 ### FR-014 Fixed Provider Probe
 
 Provider probing must be a fixed checklist, not an arbitrary IMAP command runner.
+
+Provider probing is exposed through `ksuite-mail probe imap --account <account-ref> --json`, not through `doctor`. `doctor` remains focused on local setup and health diagnostics.
+
+The account reference is mandatory and must refer to an existing configured account. The probe must not infer a default account and must not introduce test-only account registration, credential passing, or raw mailbox selection.
 
 The probe may check:
 
