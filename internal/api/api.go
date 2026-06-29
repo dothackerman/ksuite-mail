@@ -167,6 +167,12 @@ type ContextRequest struct {
 	Budget int    `json:"budget"`
 }
 
+// ProbeIMAPRequest defines /v1/probe/imap payload. Account is mandatory and
+// must name an existing daemon-side account.
+type ProbeIMAPRequest struct {
+	Account string `json:"account"`
+}
+
 // ListResponse is returned by /v1/list.
 type ListResponse struct {
 	Results []MessageSummary `json:"results"`
@@ -198,6 +204,23 @@ type ContextResponse struct {
 	Timeline      []MessageSummary `json:"timeline"`
 	Refresh       RefreshMeta      `json:"refresh"`
 	MessageBudget int              `json:"message_budget"`
+}
+
+// ProbeIMAPResponse is returned by /v1/probe/imap. It is intentionally limited
+// to sanitized fixed-checklist facts: no credentials, raw IMAP text, provider
+// error text, message content, headers, subjects, bodies, or attachment names.
+type ProbeIMAPResponse struct {
+	Account string       `json:"account"`
+	Checks  []ProbeCheck `json:"checks"`
+}
+
+// ProbeCheck is one fixed provider-probe checklist outcome. Status values are
+// stable strings such as pass, fail, inconclusive, and not_applicable.
+type ProbeCheck struct {
+	Name   string `json:"name"`
+	Status string `json:"status"`
+	Code   string `json:"code,omitempty"`
+	Detail string `json:"detail,omitempty"`
 }
 
 // ReadStatus determines which top-level status applies to read responses.

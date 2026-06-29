@@ -120,6 +120,7 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/health", s.handleHealth)
 	mux.HandleFunc("/v1/doctor", s.handleDoctor)
+	mux.HandleFunc("/v1/probe/imap", s.handleProbeIMAP)
 	mux.HandleFunc("/v1/list", s.handleList)
 	mux.HandleFunc("/v1/search", s.handleSearch)
 	mux.HandleFunc("/v1/show", s.handleShow)
@@ -175,6 +176,36 @@ func (s *Server) handleDoctor(w http.ResponseWriter, r *http.Request) {
 		StateDir:    s.opts.StateDir,
 	})
 	s.writeOK(w, report)
+}
+
+func (s *Server) handleProbeIMAP(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		s.writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "use POST for /v1/probe/imap")
+		return
+	}
+	var req api.ProbeIMAPRequest
+	if err := decodeRequestBody(r, &req); err != nil {
+		s.writeError(w, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
+	accountRef := strings.TrimSpace(req.Account)
+	if accountRef == "" {
+		s.writeError(w, http.StatusBadRequest, "missing_account", "account is required")
+		return
+	}
+
+	cfg, err := s.loadConfig()
+	if err != nil {
+		s.writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
+		return
+	}
+	acct := accountByID(cfg, accountRef)
+	if acct == nil {
+		s.writeError(w, http.StatusNotFound, "unknown_account", "account not found")
+		return
+	}
+
+	s.writeOK(w, stubProbeIMAPResponse(*acct))
 }
 
 func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
@@ -1109,6 +1140,62 @@ func accountByID(cfg *config.Config, id string) *config.Account {
 		}
 	}
 	return nil
+}
+
+func stubProbeIMAPResponse(acct config.Account) api.ProbeIMAPResponse {
+	checks := []api.ProbeCheck{
+		{
+			Name:   "account_selection",
+			Status: "pass",
+			Code:   "configured_account",
+			Detail: "selected an existing daemon-side account",
+		},
+		{
+			Name:   "fixed_checklist",
+			Status: "pass",
+			Code:   "escape_hatch_unavailable",
+			Detail: "probe uses the fixed daemon-side checklist contract",
+		},
+		{
+			Name:   "capability",
+			Status: "inconclusive",
+			Code:   "live_probe_not_implemented",
+			Detail: "live provider probing is deferred to the provider implementation slice",
+		},
+		{
+			Name:   "folder_listing",
+			Status: "inconclusive",
+			Code:   "live_probe_not_implemented",
+			Detail: "live provider probing is deferred to the provider implementation slice",
+		},
+		{
+			Name:   "uid_behavior",
+			Status: "inconclusive",
+			Code:   "live_probe_not_implemented",
+			Detail: "live provider probing is deferred to the provider implementation slice",
+		},
+		{
+			Name:   "read_state",
+			Status: "inconclusive",
+			Code:   "live_probe_not_implemented",
+			Detail: "live provider probing is deferred to the provider implementation slice",
+		},
+	}
+	domainStatus := "inconclusive"
+	domainCode := "live_probe_not_implemented"
+	domainDetail := "live provider probing is deferred to the provider implementation slice"
+	if acct.Policy == config.PolicyFull {
+		domainStatus = "not_applicable"
+		domainCode = "full_policy"
+		domainDetail = "full-policy accounts do not depend on domain-header filtering"
+	}
+	checks = append(checks, api.ProbeCheck{
+		Name:   "domain_header_search",
+		Status: domainStatus,
+		Code:   domainCode,
+		Detail: domainDetail,
+	})
+	return api.ProbeIMAPResponse{Account: acct.ID, Checks: checks}
 }
 
 func toMessageSummary(m mail.CachedMessage) api.MessageSummary {

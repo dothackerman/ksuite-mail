@@ -31,6 +31,7 @@ Commands:
   show     Show a cached message
   thread   Show cached thread around a message
   context  Show cached context around a message
+  probe    Run fixed daemon-side provider diagnostics
   doctor   Diagnose the local setup via the daemon (JSON output)
 
 Run 'ksuite-mail <command> --help' for command flags.
@@ -55,6 +56,8 @@ func main() {
 		os.Exit(runThread(os.Args[2:]))
 	case "context":
 		os.Exit(runContext(os.Args[2:]))
+	case "probe":
+		os.Exit(runProbe(os.Args[2:]))
 	case "install":
 		if err := runInstallBinaries(os.Args[2:]); err != nil {
 			fmt.Fprintf(os.Stderr, "ksuite-mail install: %v\n", err)
