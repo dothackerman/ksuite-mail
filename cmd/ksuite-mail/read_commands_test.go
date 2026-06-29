@@ -67,6 +67,36 @@ func TestReadCommandValidationErrorsEmitJSON(t *testing.T) {
 	}
 }
 
+func TestProbeCommandValidationErrorsEmitJSON(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "missing target", args: nil, want: "probe target is required"},
+		{name: "missing account", args: []string{"imap", "--json"}, want: "account is required"},
+		{name: "raw imap positional", args: []string{"imap", "--account", "rs_info", "--json", "CAPABILITY"}, want: "raw IMAP command text is not accepted"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			code, out := captureStdout(t, func() int {
+				return runProbe(tc.args)
+			})
+			if code != 2 {
+				t.Fatalf("exit code = %d, want 2", code)
+			}
+			var env api.Envelope
+			if err := json.Unmarshal([]byte(out), &env); err != nil {
+				t.Fatalf("validation output is not JSON: %v\n%s", err, out)
+			}
+			if env.Status != api.StatusError || env.Error == nil ||
+				env.Error.Code != "bad_request" || env.Error.Message != tc.want {
+				t.Fatalf("validation envelope = %+v", env)
+			}
+		})
+	}
+}
+
 func TestReadCommandsAcceptDocumentedFlagsAndPositionals(t *testing.T) {
 	cases := []struct {
 		name      string
@@ -177,6 +207,24 @@ func TestReadCommandsAcceptDocumentedFlagsAndPositionals(t *testing.T) {
 			}
 			tc.assertReq(t, req.body)
 		})
+	}
+}
+
+func TestProbeCommandReachesDaemonPath(t *testing.T) {
+	socket, requests := startReadCommandSocket(t)
+	code := runProbe([]string{"imap", "--socket", socket, "--account", "rs_info", "--json"})
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	if len(*requests) != 1 {
+		t.Fatalf("requests = %d, want 1", len(*requests))
+	}
+	req := (*requests)[0]
+	if req.path != "/v1/probe/imap" {
+		t.Fatalf("path = %q, want /v1/probe/imap", req.path)
+	}
+	if req.body["account"] != "rs_info" {
+		t.Fatalf("account = %v, want rs_info", req.body["account"])
 	}
 }
 

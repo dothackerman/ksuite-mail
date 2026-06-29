@@ -1,6 +1,7 @@
 package daemon_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -129,6 +130,65 @@ func TestDoctorEndpointReturnsReport(t *testing.T) {
 	}
 }
 
+func TestProbeIMAPEndpointValidatesAccountAndReturnsStubChecklist(t *testing.T) {
+	ts := newLocalHTTPServer(t, healthyDeployment(t))
+	defer ts.Close()
+
+	resp, err := http.Post(ts.URL+"/v1/probe/imap", "application/json", bytes.NewBufferString(`{"account":"rs_info"}`))
+	if err != nil {
+		t.Fatalf("POST probe: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	env := decodeEnvelope(t, resp.Body)
+	var probe api.ProbeIMAPResponse
+	if err := env.DecodeResult(&probe); err != nil {
+		t.Fatalf("decode probe: %v", err)
+	}
+	if probe.Account != "rs_info" {
+		t.Fatalf("account = %q, want rs_info", probe.Account)
+	}
+	if len(probe.Checks) == 0 {
+		t.Fatalf("expected fixed checklist")
+	}
+	if strings.Contains(mustJSON(t, env), "pw") || strings.Contains(mustJSON(t, env), "CAPABILITY ") {
+		t.Fatalf("probe response leaked secret or raw command text: %+v", env)
+	}
+}
+
+func TestProbeIMAPEndpointRejectsMissingAndUnknownAccount(t *testing.T) {
+	ts := newLocalHTTPServer(t, healthyDeployment(t))
+	defer ts.Close()
+
+	cases := []struct {
+		name     string
+		body     string
+		wantCode int
+		wantErr  string
+	}{
+		{name: "missing", body: `{}`, wantCode: http.StatusBadRequest, wantErr: "missing_account"},
+		{name: "unknown", body: `{"account":"missing"}`, wantCode: http.StatusNotFound, wantErr: "unknown_account"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			resp, err := http.Post(ts.URL+"/v1/probe/imap", "application/json", bytes.NewBufferString(tc.body))
+			if err != nil {
+				t.Fatalf("POST probe: %v", err)
+			}
+			defer func() { _ = resp.Body.Close() }()
+			if resp.StatusCode != tc.wantCode {
+				t.Fatalf("status = %d, want %d", resp.StatusCode, tc.wantCode)
+			}
+			env := decodeEnvelope(t, resp.Body)
+			if env.Status != api.StatusError || env.Error == nil || env.Error.Code != tc.wantErr {
+				t.Fatalf("envelope = %+v", env)
+			}
+		})
+	}
+}
+
 func TestWrongMethodIsRejected(t *testing.T) {
 	ts := newLocalHTTPServer(t, healthyDeployment(t))
 	defer ts.Close()
@@ -137,6 +197,7 @@ func TestWrongMethodIsRejected(t *testing.T) {
 		method, path string
 	}{
 		{http.MethodGet, "/v1/doctor"},
+		{http.MethodGet, "/v1/probe/imap"},
 		{http.MethodPost, "/v1/health"},
 	}
 	for _, c := range cases {
@@ -154,6 +215,15 @@ func TestWrongMethodIsRejected(t *testing.T) {
 			t.Fatalf("%s %s envelope = %+v, want error", c.method, c.path, env)
 		}
 	}
+}
+
+func mustJSON(t *testing.T, v any) string {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("marshal json: %v", err)
+	}
+	return string(b)
 }
 
 func TestUnknownPathReturnsErrorEnvelope(t *testing.T) {
