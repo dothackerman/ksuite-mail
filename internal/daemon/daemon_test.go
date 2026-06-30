@@ -110,6 +110,41 @@ func (s rangeIgnoringSource) ListUIDs(ctx context.Context, acct config.Account, 
 	return s.Source.ListUIDs(ctx, acct, folder, mail.UIDRange{})
 }
 
+type timeoutProbeSource struct{}
+
+func (timeoutProbeSource) Capabilities(context.Context, config.Account) ([]string, error) {
+	return []string{"IMAP4rev1"}, nil
+}
+
+func (timeoutProbeSource) Folders(ctx context.Context, _ config.Account) ([]string, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func (timeoutProbeSource) SelectFolder(context.Context, config.Account, string) (mail.RemoteFolderState, error) {
+	return mail.RemoteFolderState{}, errors.New("unexpected select")
+}
+
+func (timeoutProbeSource) SearchAllowed(context.Context, config.Account, string, string, string, mail.UIDRange) ([]mail.UID, error) {
+	return nil, errors.New("unexpected search")
+}
+
+func (timeoutProbeSource) ListUIDs(context.Context, config.Account, string, mail.UIDRange) ([]mail.UID, error) {
+	return nil, errors.New("unexpected list")
+}
+
+func (timeoutProbeSource) FetchHeaders(context.Context, config.Account, string, []mail.UID) ([]mail.MessageHeaders, error) {
+	return nil, errors.New("unexpected headers")
+}
+
+func (timeoutProbeSource) FetchEnvelopes(context.Context, config.Account, string, []mail.UID) ([]mail.MessageEnvelope, error) {
+	return nil, errors.New("unexpected fetch")
+}
+
+func (timeoutProbeSource) FetchBodyPreview(context.Context, config.Account, string, mail.UID, int) (string, error) {
+	return "", errors.New("unexpected preview")
+}
+
 func newLocalHTTPServer(t *testing.T, opts daemon.Options) *httptest.Server {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -328,6 +363,40 @@ func TestProbeIMAPEndpointSanitizesLiveAdapterFailure(t *testing.T) {
 				t.Fatalf("%s code = %q, want prerequisite_failed", check.ID, check.Code)
 			}
 		}
+	}
+}
+
+func TestProbeIMAPEndpointBoundsEntireProbeBeforeClientTimeout(t *testing.T) {
+	opts := healthyDeployment(t)
+	opts.ProbeTimeout = 30 * time.Millisecond
+	opts.ProbeSourceFactory = func(context.Context, *config.Config) (mail.Source, error) {
+		return timeoutProbeSource{}, nil
+	}
+	ts := newLocalHTTPServer(t, opts)
+	defer ts.Close()
+
+	client := &http.Client{Timeout: time.Second}
+	start := time.Now()
+	resp, err := client.Post(ts.URL+"/v1/probe/imap", "application/json", bytes.NewBufferString(`{"account":"rs_info"}`))
+	if err != nil {
+		t.Fatalf("POST probe: %v", err)
+	}
+	elapsed := time.Since(start)
+	defer func() { _ = resp.Body.Close() }()
+	if elapsed > 500*time.Millisecond {
+		t.Fatalf("probe took %s, want daemon-side timeout before client timeout", elapsed)
+	}
+	env := decodeEnvelope(t, resp.Body)
+	var probe api.ProbeIMAPResponse
+	if err := env.DecodeResult(&probe); err != nil {
+		t.Fatalf("decode probe: %v", err)
+	}
+	if probe.Status != api.ProbeStatusFailed {
+		t.Fatalf("probe status = %q, want failed", probe.Status)
+	}
+	check := probeCheckByID(t, probe, "folder_listing")
+	if check.Status != api.ProbeStatusFailed || check.Code != "remote_timeout" || check.Detail != "provider probe failed" {
+		t.Fatalf("folder_listing check = %+v", check)
 	}
 }
 

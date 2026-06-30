@@ -37,11 +37,12 @@ import (
 const systemdListenFDStart = 3
 
 const (
-	defaultLimit      = 100
-	defaultBudget     = 1200
-	defaultContextMax = 1200
-	maxReadWindow     = 1000
-	maxContextBudget  = 12 * 1024
+	defaultLimit       = 100
+	defaultBudget      = 1200
+	defaultContextMax  = 1200
+	maxReadWindow      = 1000
+	maxContextBudget   = 12 * 1024
+	defaultProbeBudget = 18 * time.Second
 )
 
 // source matches the narrow read-only adapter interface.
@@ -101,6 +102,7 @@ type Options struct {
 	Logger             *slog.Logger
 	SourceFactory      SourceFactory
 	ProbeSourceFactory SourceFactory
+	ProbeTimeout       time.Duration
 }
 
 // Server serves the local API.
@@ -212,13 +214,16 @@ func (s *Server) handleProbeIMAP(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusFailedDependency, probeCredentialErrorCode(err), "selected account credential is unavailable")
 		return
 	}
-	src, err := s.probeSourceForConfig(r.Context(), cfg)
+	probeCtx, cancel := context.WithTimeout(r.Context(), s.probeTimeout())
+	defer cancel()
+
+	src, err := s.probeSourceForConfig(probeCtx, cfg)
 	if err != nil {
 		s.writeError(w, http.StatusInternalServerError, "source_unavailable", "mail source is unavailable")
 		return
 	}
 
-	s.writeOK(w, probeIMAPResponse(r.Context(), src, *acct))
+	s.writeOK(w, probeIMAPResponse(probeCtx, src, *acct))
 }
 
 func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
@@ -925,6 +930,13 @@ func (s *Server) probeSourceForConfig(ctx context.Context, cfg *config.Config) (
 		return nil, nil
 	}
 	return s.opts.ProbeSourceFactory(ctx, cfg)
+}
+
+func (s *Server) probeTimeout() time.Duration {
+	if s.opts.ProbeTimeout > 0 {
+		return s.opts.ProbeTimeout
+	}
+	return defaultProbeBudget
 }
 
 func (s *Server) openRepository() (*cache.Repository, error) {

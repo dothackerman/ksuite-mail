@@ -4,9 +4,11 @@
 package imapadapter
 
 import (
+	"bufio"
 	"context"
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"net"
 	"sort"
 	"strconv"
@@ -106,26 +108,20 @@ func (s *Source) SelectFolder(ctx context.Context, acct config.Account, folder s
 
 // SearchAllowed issues UID SEARCH HEADER with optional UID range criteria.
 func (s *Source) SearchAllowed(ctx context.Context, acct config.Account, folder string, header string, value string, scope mail.UIDRange) ([]mail.UID, error) {
-	c, err := s.connect(ctx, acct)
+	c, err := s.connectRaw(ctx, acct)
 	if err != nil {
 		return nil, err
 	}
 	defer c.close()
-	if _, err := c.client.Select(folder, &imap.SelectOptions{ReadOnly: true}).Wait(); err != nil {
+
+	if err := c.commandOK("EXAMINE", quoteIMAPString(folder)); err != nil {
 		return nil, normalizeCommandError(err)
 	}
-
-	criteria := &imap.SearchCriteria{
-		Header: []imap.SearchCriteriaHeaderField{{Key: header, Value: value}},
-	}
-	if uidSet, ok := uidRangeSet(scope); ok {
-		criteria.UID = []imap.UIDSet{uidSet}
-	}
-	data, err := c.client.UIDSearch(criteria, nil).Wait()
+	uids, err := c.uidSearchHeader(header, value, scope)
 	if err != nil {
 		return nil, normalizeCommandError(err)
 	}
-	return toMailUIDs(data.AllUIDs()), nil
+	return uids, nil
 }
 
 // ListUIDs returns UIDs in a folder, optionally bounded by a UID range.
@@ -179,6 +175,51 @@ func (s *Source) connect(ctx context.Context, acct config.Account) (liveConn, er
 	if err != nil {
 		return liveConn{}, err
 	}
+	tlsConfig := s.connectionTLSConfig(acct)
+	opts := &imapclient.Options{
+		TLSConfig: tlsConfig,
+	}
+	conn, err := s.dial(ctx, acct)
+	if err != nil {
+		return liveConn{}, normalizeCommandError(err)
+	}
+	client := imapclient.New(conn, opts)
+	if err := client.Login(acct.Username, password).Wait(); err != nil {
+		_ = client.Close()
+		return liveConn{}, normalizeCommandError(err)
+	}
+	return liveConn{client: client}, nil
+}
+
+func (s *Source) connectRaw(ctx context.Context, acct config.Account) (*rawIMAPConn, error) {
+	if acct.TLS == nil || !*acct.TLS {
+		return nil, mail.ErrSourceUnavailable
+	}
+	password, err := s.password(acct)
+	if err != nil {
+		return nil, err
+	}
+	conn, err := s.dial(ctx, acct)
+	if err != nil {
+		return nil, normalizeCommandError(err)
+	}
+	raw := &rawIMAPConn{
+		conn: conn,
+		r:    bufio.NewReader(conn),
+		w:    bufio.NewWriter(conn),
+	}
+	if err := raw.readGreeting(); err != nil {
+		_ = conn.Close()
+		return nil, normalizeCommandError(err)
+	}
+	if err := raw.commandOK("LOGIN", quoteIMAPString(acct.Username), quoteIMAPString(password)); err != nil {
+		_ = conn.Close()
+		return nil, normalizeCommandError(err)
+	}
+	return raw, nil
+}
+
+func (s *Source) dial(ctx context.Context, acct config.Account) (net.Conn, error) {
 	address := net.JoinHostPort(acct.Host, strconv.Itoa(acct.Port))
 	timeout := s.timeout
 	if timeout <= 0 {
@@ -186,34 +227,108 @@ func (s *Source) connect(ctx context.Context, acct config.Account) (liveConn, er
 	}
 	dialer := &net.Dialer{Timeout: timeout}
 	deadline := time.Now().Add(timeout)
-	if deadline, ok := ctx.Deadline(); ok {
-		if remaining := time.Until(deadline); remaining > 0 && remaining < timeout {
+	if ctxDeadline, ok := ctx.Deadline(); ok {
+		if remaining := time.Until(ctxDeadline); remaining > 0 && remaining < timeout {
 			dialer.Timeout = remaining
 		}
+		if ctxDeadline.Before(deadline) {
+			deadline = ctxDeadline
+		}
 	}
-	if ctxDeadline, ok := ctx.Deadline(); ok && ctxDeadline.Before(deadline) {
-		deadline = ctxDeadline
-	}
-
 	tlsConfig := s.connectionTLSConfig(acct)
-	opts := &imapclient.Options{
-		TLSConfig: tlsConfig,
-	}
 	conn, err := tls.DialWithDialer(dialer, "tcp", address, tlsConfig)
 	if err != nil {
-		return liveConn{}, normalizeCommandError(err)
+		return nil, err
 	}
 	boundedConn := deadlineConn{Conn: conn, deadline: deadline}
 	if err := boundedConn.SetDeadline(deadline); err != nil {
 		_ = conn.Close()
-		return liveConn{}, normalizeCommandError(err)
+		return nil, err
 	}
-	client := imapclient.New(boundedConn, opts)
-	if err := client.Login(acct.Username, password).Wait(); err != nil {
-		_ = client.Close()
-		return liveConn{}, normalizeCommandError(err)
+	return boundedConn, nil
+}
+
+type rawIMAPConn struct {
+	conn net.Conn
+	r    *bufio.Reader
+	w    *bufio.Writer
+	tag  int
+}
+
+func (c *rawIMAPConn) close() {
+	_ = c.commandOK("LOGOUT")
+	_ = c.conn.Close()
+}
+
+func (c *rawIMAPConn) readGreeting() error {
+	line, err := c.readLine()
+	if err != nil {
+		return err
 	}
-	return liveConn{client: client}, nil
+	if !strings.HasPrefix(strings.ToUpper(line), "* OK") && !strings.HasPrefix(strings.ToUpper(line), "* PREAUTH") {
+		return mail.ErrSourceUnavailable
+	}
+	return nil
+}
+
+func (c *rawIMAPConn) commandOK(name string, args ...string) error {
+	_, err := c.command(name, args...)
+	return err
+}
+
+func (c *rawIMAPConn) uidSearchHeader(header string, value string, scope mail.UIDRange) ([]mail.UID, error) {
+	args := []string{"SEARCH"}
+	if uidSet, ok := uidRangeSet(scope); ok {
+		args = append(args, "UID", uidSet.String())
+	}
+	args = append(args, "HEADER", quoteIMAPString(header), quoteIMAPString(value))
+	lines, err := c.command("UID", args...)
+	if err != nil {
+		return nil, err
+	}
+	return parseSearchUIDs(lines), nil
+}
+
+func (c *rawIMAPConn) command(name string, args ...string) ([]string, error) {
+	c.tag++
+	tag := fmt.Sprintf("A%04d", c.tag)
+	line := tag + " " + name
+	if len(args) > 0 {
+		line += " " + strings.Join(args, " ")
+	}
+	if _, err := c.w.WriteString(line + "\r\n"); err != nil {
+		return nil, err
+	}
+	if err := c.w.Flush(); err != nil {
+		return nil, err
+	}
+
+	var untagged []string
+	for {
+		resp, err := c.readLine()
+		if err != nil {
+			return nil, err
+		}
+		if strings.HasPrefix(resp, "* ") {
+			untagged = append(untagged, resp)
+			continue
+		}
+		if strings.HasPrefix(resp, tag+" ") {
+			status := strings.ToUpper(firstField(strings.TrimSpace(strings.TrimPrefix(resp, tag))))
+			if status == "OK" {
+				return untagged, nil
+			}
+			return nil, mail.ErrSourceUnavailable
+		}
+	}
+}
+
+func (c *rawIMAPConn) readLine() (string, error) {
+	line, err := c.r.ReadString('\n')
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimRight(line, "\r\n"), nil
 }
 
 type deadlineConn struct {
@@ -291,6 +406,60 @@ func sanitizeFolder(folder string) string {
 		}
 	}
 	return clean
+}
+
+func quoteIMAPString(value string) string {
+	var b strings.Builder
+	b.Grow(len(value) + 2)
+	b.WriteByte('"')
+	for _, r := range value {
+		switch r {
+		case '\\', '"':
+			b.WriteByte('\\')
+			b.WriteRune(r)
+		case '\r', '\n':
+			continue
+		default:
+			b.WriteRune(r)
+		}
+	}
+	b.WriteByte('"')
+	return b.String()
+}
+
+func firstField(value string) string {
+	if value == "" {
+		return ""
+	}
+	fields := strings.Fields(value)
+	if len(fields) == 0 {
+		return ""
+	}
+	return fields[0]
+}
+
+func parseSearchUIDs(lines []string) []mail.UID {
+	seen := map[mail.UID]bool{}
+	var out []mail.UID
+	for _, line := range lines {
+		fields := strings.Fields(line)
+		if len(fields) < 2 || fields[0] != "*" || strings.ToUpper(fields[1]) != "SEARCH" {
+			continue
+		}
+		for _, field := range fields[2:] {
+			uid, err := strconv.ParseUint(field, 10, 64)
+			if err != nil || uid == 0 {
+				continue
+			}
+			mailUID := mail.UID(uid)
+			if !seen[mailUID] {
+				out = append(out, mailUID)
+				seen[mailUID] = true
+			}
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out
 }
 
 func uidRangeSet(scope mail.UIDRange) (imap.UIDSet, bool) {

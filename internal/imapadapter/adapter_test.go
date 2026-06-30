@@ -1,6 +1,7 @@
 package imapadapter
 
 import (
+	"bufio"
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
@@ -67,6 +68,49 @@ func TestSourceTimesOutWhenServerHangsAfterConnect(t *testing.T) {
 	}
 }
 
+func TestSearchAllowedUsesHeaderSearchForAddressHeaders(t *testing.T) {
+	ln, roots, commands := newHeaderSearchTLSServer(t)
+	defer func() { _ = ln.Close() }()
+
+	host, portText, err := net.SplitHostPort(ln.Addr().String())
+	if err != nil {
+		t.Fatalf("split listener address: %v", err)
+	}
+	var port int
+	if _, err := fmt.Sscanf(portText, "%d", &port); err != nil {
+		t.Fatalf("parse port %q: %v", portText, err)
+	}
+	acct := testAccount(t)
+	acct.Host = host
+	acct.Port = port
+
+	src := &Source{
+		secretsPath: writeTestSecrets(t),
+		timeout:     time.Second,
+		tlsConfig:   &tls.Config{RootCAs: roots},
+	}
+
+	uids, err := src.SearchAllowed(context.Background(), acct, "INBOX", "From", "regenerativ.ch", mail.UIDRange{})
+	if err != nil {
+		t.Fatalf("SearchAllowed: %v", err)
+	}
+	if got, want := fmt.Sprint(uids), "[7 42]"; got != want {
+		t.Fatalf("UIDs = %s, want %s", got, want)
+	}
+
+	var gotCommands []string
+	for cmd := range commands {
+		gotCommands = append(gotCommands, cmd)
+	}
+	wire := strings.Join(gotCommands, "\n")
+	if !strings.Contains(wire, `UID SEARCH HEADER "From" "regenerativ.ch"`) {
+		t.Fatalf("wire commands missing HEADER search:\n%s", wire)
+	}
+	if strings.Contains(wire, "UID SEARCH FROM") {
+		t.Fatalf("wire commands used shorthand FROM search:\n%s", wire)
+	}
+}
+
 func testAccount(t *testing.T) config.Account {
 	t.Helper()
 	tlsEnabled := true
@@ -117,6 +161,67 @@ func newHangingTLSServer(t *testing.T) (net.Listener, *x509.CertPool) {
 		time.Sleep(2 * time.Second)
 	}()
 	return ln, roots
+}
+
+func newHeaderSearchTLSServer(t *testing.T) (net.Listener, *x509.CertPool, <-chan string) {
+	t.Helper()
+	cert, roots := testCertificate(t)
+	base, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		if errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.EACCES) || strings.Contains(err.Error(), "operation not permitted") {
+			t.Skipf("TCP listener denied by environment: %v", err)
+		}
+		t.Fatalf("listen tcp: %v", err)
+	}
+	ln := tls.NewListener(base, &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12})
+	commands := make(chan string, 8)
+	go func() {
+		defer close(commands)
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		r := bufio.NewReader(conn)
+		w := bufio.NewWriter(conn)
+		writeIMAPLine(w, "* OK ready")
+		for {
+			line, err := r.ReadString('\n')
+			if err != nil {
+				return
+			}
+			line = strings.TrimRight(line, "\r\n")
+			commands <- line
+			fields := strings.Fields(line)
+			if len(fields) < 2 {
+				continue
+			}
+			tag := fields[0]
+			switch strings.ToUpper(fields[1]) {
+			case "LOGIN":
+				writeIMAPLine(w, tag+" OK LOGIN completed")
+			case "EXAMINE":
+				writeIMAPLine(w, "* FLAGS (\\Seen)")
+				writeIMAPLine(w, "* 1 EXISTS")
+				writeIMAPLine(w, tag+" OK [READ-ONLY] EXAMINE completed")
+			case "UID":
+				writeIMAPLine(w, "* SEARCH 42 7")
+				writeIMAPLine(w, tag+" OK SEARCH completed")
+			case "LOGOUT":
+				writeIMAPLine(w, "* BYE closing")
+				writeIMAPLine(w, tag+" OK LOGOUT completed")
+				return
+			default:
+				writeIMAPLine(w, tag+" BAD unsupported")
+			}
+		}
+	}()
+	return ln, roots, commands
+}
+
+func writeIMAPLine(w *bufio.Writer, line string) {
+	_, _ = w.WriteString(line + "\r\n")
+	_ = w.Flush()
 }
 
 func testCertificate(t *testing.T) (tls.Certificate, *x509.CertPool) {
