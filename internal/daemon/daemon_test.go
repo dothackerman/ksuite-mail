@@ -17,7 +17,10 @@ import (
 	"time"
 
 	"github.com/dothackerman/ksuite-mail/internal/api"
+	"github.com/dothackerman/ksuite-mail/internal/config"
 	"github.com/dothackerman/ksuite-mail/internal/daemon"
+	"github.com/dothackerman/ksuite-mail/internal/mail"
+	"github.com/dothackerman/ksuite-mail/internal/mailfake"
 )
 
 const validConfig = `[mail]
@@ -33,6 +36,38 @@ username = "info@example.com"
 password_ref = { source = "file", provider = "local", id = "/ksuite-mail/rs_info/password" }
 policy = "full"
 folders = ["INBOX"]
+`
+
+const domainConfig = `[mail]
+default_limit = 50
+
+[[mail.accounts]]
+id = "rs_info"
+email = "info@example.com"
+host = "imap.example.com"
+port = 993
+tls = true
+username = "info@example.com"
+password_ref = { source = "file", provider = "local", id = "/ksuite-mail/rs_info/password" }
+policy = "domain"
+domains = ["regenerativ.ch"]
+folders = ["INBOX"]
+`
+
+const multiDomainSentConfig = `[mail]
+default_limit = 50
+
+[[mail.accounts]]
+id = "rs_info"
+email = "info@example.com"
+host = "imap.example.com"
+port = 993
+tls = true
+username = "info@example.com"
+password_ref = { source = "file", provider = "local", id = "/ksuite-mail/rs_info/password" }
+policy = "domain"
+domains = ["regenerativ.ch", "example.org"]
+folders = ["INBOX", "Sent"]
 `
 
 func healthyDeployment(t *testing.T) daemon.Options {
@@ -54,6 +89,15 @@ func healthyDeployment(t *testing.T) daemon.Options {
 	return daemon.Options{ConfigPath: cfgPath, SecretsPath: secPath, StateDir: stateDir}
 }
 
+func probeDeployment(t *testing.T, adapter *mailfake.Adapter) daemon.Options {
+	t.Helper()
+	opts := healthyDeployment(t)
+	opts.ProbeSourceFactory = func(context.Context, *config.Config) (mail.Source, error) {
+		return adapter, nil
+	}
+	return opts
+}
+
 func decodeEnvelope(t *testing.T, body io.Reader) api.Envelope {
 	t.Helper()
 	var env api.Envelope
@@ -61,6 +105,83 @@ func decodeEnvelope(t *testing.T, body io.Reader) api.Envelope {
 		t.Fatalf("decode envelope: %v", err)
 	}
 	return env
+}
+
+func probeCheckByID(t *testing.T, probe api.ProbeIMAPResponse, id string) api.ProbeCheck {
+	t.Helper()
+	for _, check := range probe.Checks {
+		if check.ID == id {
+			return check
+		}
+	}
+	t.Fatalf("probe check %q missing from %+v", id, probe.Checks)
+	return api.ProbeCheck{}
+}
+
+func postProbeIMAP(t *testing.T, ts *httptest.Server) api.ProbeIMAPResponse {
+	t.Helper()
+	resp, err := http.Post(ts.URL+"/v1/probe/imap", "application/json", bytes.NewBufferString(`{"account":"rs_info"}`))
+	if err != nil {
+		t.Fatalf("POST probe: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	env := decodeEnvelope(t, resp.Body)
+	var probe api.ProbeIMAPResponse
+	if err := env.DecodeResult(&probe); err != nil {
+		t.Fatalf("decode probe: %v", err)
+	}
+	return probe
+}
+
+func setNegativeDomainHeaderResults(adapter *mailfake.Adapter, account string, folders []string) {
+	for _, folder := range folders {
+		for _, header := range []string{"From", "To", "Cc", "Bcc"} {
+			adapter.SetSearchResult(account, folder, header, "ksuite-mail-probe.invalid", nil)
+		}
+	}
+}
+
+type rangeIgnoringSource struct {
+	mail.Source
+}
+
+func (s rangeIgnoringSource) ListUIDs(ctx context.Context, acct config.Account, folder string, _ mail.UIDRange) ([]mail.UID, error) {
+	return s.Source.ListUIDs(ctx, acct, folder, mail.UIDRange{})
+}
+
+type timeoutProbeSource struct{}
+
+func (timeoutProbeSource) Capabilities(context.Context, config.Account) ([]string, error) {
+	return []string{"IMAP4rev1"}, nil
+}
+
+func (timeoutProbeSource) Folders(ctx context.Context, _ config.Account) ([]string, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func (timeoutProbeSource) SelectFolder(context.Context, config.Account, string) (mail.RemoteFolderState, error) {
+	return mail.RemoteFolderState{}, errors.New("unexpected select")
+}
+
+func (timeoutProbeSource) SearchAllowed(context.Context, config.Account, string, string, string, mail.UIDRange) ([]mail.UID, error) {
+	return nil, errors.New("unexpected search")
+}
+
+func (timeoutProbeSource) ListUIDs(context.Context, config.Account, string, mail.UIDRange) ([]mail.UID, error) {
+	return nil, errors.New("unexpected list")
+}
+
+func (timeoutProbeSource) FetchHeaders(context.Context, config.Account, string, []mail.UID) ([]mail.MessageHeaders, error) {
+	return nil, errors.New("unexpected headers")
+}
+
+func (timeoutProbeSource) FetchEnvelopes(context.Context, config.Account, string, []mail.UID) ([]mail.MessageEnvelope, error) {
+	return nil, errors.New("unexpected fetch")
+}
+
+func (timeoutProbeSource) FetchBodyPreview(context.Context, config.Account, string, mail.UID, int) (string, error) {
+	return "", errors.New("unexpected preview")
 }
 
 func newLocalHTTPServer(t *testing.T, opts daemon.Options) *httptest.Server {
@@ -130,8 +251,14 @@ func TestDoctorEndpointReturnsReport(t *testing.T) {
 	}
 }
 
-func TestProbeIMAPEndpointValidatesAccountAndReturnsStubChecklist(t *testing.T) {
-	ts := newLocalHTTPServer(t, healthyDeployment(t))
+func TestProbeIMAPEndpointValidatesAccountAndRunsLiveChecklist(t *testing.T) {
+	adapter := mailfake.NewAdapter(map[string]map[string][]mailfake.Message{
+		"rs_info": {
+			"INBOX":                  {{UID: 10, VisibleByPolicy: true}, {UID: 20, VisibleByPolicy: true}},
+			"private-folder-name-pw": {},
+		},
+	})
+	ts := newLocalHTTPServer(t, probeDeployment(t, adapter))
 	defer ts.Close()
 
 	resp, err := http.Post(ts.URL+"/v1/probe/imap", "application/json", bytes.NewBufferString(`{"account":"rs_info"}`))
@@ -150,8 +277,8 @@ func TestProbeIMAPEndpointValidatesAccountAndReturnsStubChecklist(t *testing.T) 
 	if probe.Account != "rs_info" {
 		t.Fatalf("account = %q, want rs_info", probe.Account)
 	}
-	if probe.Status != api.ProbeStatusInconclusive {
-		t.Fatalf("status = %q, want %q", probe.Status, api.ProbeStatusInconclusive)
+	if probe.Status != api.ProbeStatusPassed {
+		t.Fatalf("status = %q, want %q", probe.Status, api.ProbeStatusPassed)
 	}
 	if len(probe.Checks) == 0 {
 		t.Fatalf("expected fixed checklist")
@@ -169,11 +296,342 @@ func TestProbeIMAPEndpointValidatesAccountAndReturnsStubChecklist(t *testing.T) 
 	if checks["account_selection"] != api.ProbeStatusPassed {
 		t.Fatalf("account_selection status = %q, want %q", checks["account_selection"], api.ProbeStatusPassed)
 	}
+	if checks["capability"] != api.ProbeStatusPassed {
+		t.Fatalf("capability status = %q, want %q", checks["capability"], api.ProbeStatusPassed)
+	}
+	if checks["folder_listing"] != api.ProbeStatusPassed {
+		t.Fatalf("folder_listing status = %q, want %q", checks["folder_listing"], api.ProbeStatusPassed)
+	}
+	if checks["folder_selection"] != api.ProbeStatusPassed {
+		t.Fatalf("folder_selection status = %q, want %q", checks["folder_selection"], api.ProbeStatusPassed)
+	}
+	if checks["uid_behavior"] != api.ProbeStatusPassed {
+		t.Fatalf("uid_behavior status = %q, want %q", checks["uid_behavior"], api.ProbeStatusPassed)
+	}
 	if checks["domain_header_search"] != api.ProbeStatusNotApplicable {
 		t.Fatalf("domain_header_search status = %q, want %q", checks["domain_header_search"], api.ProbeStatusNotApplicable)
 	}
-	if strings.Contains(mustJSON(t, env), "pw") || strings.Contains(mustJSON(t, env), "CAPABILITY ") {
+	if strings.Contains(mustJSON(t, env), "pw") ||
+		strings.Contains(mustJSON(t, env), "private-folder-name") ||
+		strings.Contains(mustJSON(t, env), "CAPABILITY ") {
 		t.Fatalf("probe response leaked secret or raw command text: %+v", env)
+	}
+	calls := adapter.CallsSnapshot()
+	if len(calls) == 0 || calls[0].Method != "capability" {
+		t.Fatalf("expected probe to call live adapter path, calls=%#v", calls)
+	}
+}
+
+func TestProbeIMAPEndpointUsesProbeSourceWithoutReadSource(t *testing.T) {
+	adapter := mailfake.NewAdapter(map[string]map[string][]mailfake.Message{
+		"rs_info": {"INBOX": {{UID: 10, VisibleByPolicy: true}}},
+	})
+	opts := healthyDeployment(t)
+	opts.SourceFactory = func(context.Context, *config.Config) (mail.Source, error) {
+		return nil, errors.New("read source should not be used by probe")
+	}
+	opts.ProbeSourceFactory = func(context.Context, *config.Config) (mail.Source, error) {
+		return adapter, nil
+	}
+	ts := newLocalHTTPServer(t, opts)
+	defer ts.Close()
+
+	resp, err := http.Post(ts.URL+"/v1/probe/imap", "application/json", bytes.NewBufferString(`{"account":"rs_info"}`))
+	if err != nil {
+		t.Fatalf("POST probe: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	env := decodeEnvelope(t, resp.Body)
+	if env.Status != api.StatusOK {
+		t.Fatalf("envelope status = %q, want ok", env.Status)
+	}
+	if calls := adapter.CallsSnapshot(); len(calls) == 0 || calls[0].Method != "capability" {
+		t.Fatalf("probe source was not used, calls=%#v", calls)
+	}
+}
+
+func TestProbeIMAPEndpointSanitizesLiveAdapterFailure(t *testing.T) {
+	adapter := mailfake.NewAdapter(map[string]map[string][]mailfake.Message{
+		"rs_info": {"INBOX": {}},
+	})
+	adapter.SetFailure("capability", "rs_info", "", "", errors.New("NO auth failed for info@example.com with pw and private text"))
+	ts := newLocalHTTPServer(t, probeDeployment(t, adapter))
+	defer ts.Close()
+
+	resp, err := http.Post(ts.URL+"/v1/probe/imap", "application/json", bytes.NewBufferString(`{"account":"rs_info"}`))
+	if err != nil {
+		t.Fatalf("POST probe: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	env := decodeEnvelope(t, resp.Body)
+	var probe api.ProbeIMAPResponse
+	if err := env.DecodeResult(&probe); err != nil {
+		t.Fatalf("decode probe: %v", err)
+	}
+	if probe.Status != api.ProbeStatusFailed {
+		t.Fatalf("probe status = %q, want failed", probe.Status)
+	}
+	raw := mustJSON(t, env)
+	for _, leak := range []string{"pw", "info@example.com", "private text", "auth failed"} {
+		if strings.Contains(raw, leak) {
+			t.Fatalf("probe failure leaked %q in %s", leak, raw)
+		}
+	}
+	found := false
+	for _, check := range probe.Checks {
+		if check.ID == "capability" {
+			found = true
+			if check.Code != "remote_failed" || check.Detail != "provider probe failed" {
+				t.Fatalf("capability check = %+v", check)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("capability check missing")
+	}
+	if calls := adapter.CallsSnapshot(); len(calls) != 1 || calls[0].Method != "capability" {
+		t.Fatalf("probe should stop after first source failure, calls=%#v", calls)
+	}
+	for _, check := range probe.Checks {
+		switch check.ID {
+		case "folder_listing", "folder_selection", "uid_behavior", "read_state":
+			if check.Code != "prerequisite_failed" {
+				t.Fatalf("%s code = %q, want prerequisite_failed", check.ID, check.Code)
+			}
+		}
+	}
+}
+
+func TestProbeIMAPEndpointBoundsEntireProbeBeforeClientTimeout(t *testing.T) {
+	opts := healthyDeployment(t)
+	opts.ProbeTimeout = 30 * time.Millisecond
+	opts.ProbeSourceFactory = func(context.Context, *config.Config) (mail.Source, error) {
+		return timeoutProbeSource{}, nil
+	}
+	ts := newLocalHTTPServer(t, opts)
+	defer ts.Close()
+
+	client := &http.Client{Timeout: time.Second}
+	start := time.Now()
+	resp, err := client.Post(ts.URL+"/v1/probe/imap", "application/json", bytes.NewBufferString(`{"account":"rs_info"}`))
+	if err != nil {
+		t.Fatalf("POST probe: %v", err)
+	}
+	elapsed := time.Since(start)
+	defer func() { _ = resp.Body.Close() }()
+	if elapsed > 500*time.Millisecond {
+		t.Fatalf("probe took %s, want daemon-side timeout before client timeout", elapsed)
+	}
+	env := decodeEnvelope(t, resp.Body)
+	var probe api.ProbeIMAPResponse
+	if err := env.DecodeResult(&probe); err != nil {
+		t.Fatalf("decode probe: %v", err)
+	}
+	if probe.Status != api.ProbeStatusFailed {
+		t.Fatalf("probe status = %q, want failed", probe.Status)
+	}
+	check := probeCheckByID(t, probe, "folder_listing")
+	if check.Status != api.ProbeStatusFailed || check.Code != "remote_timeout" || check.Detail != "provider probe failed" {
+		t.Fatalf("folder_listing check = %+v", check)
+	}
+}
+
+func TestProbeIMAPEndpointFailsUIDRangeMismatch(t *testing.T) {
+	adapter := mailfake.NewAdapter(map[string]map[string][]mailfake.Message{
+		"rs_info": {"INBOX": {{UID: 10, VisibleByPolicy: true}, {UID: 20, VisibleByPolicy: true}}},
+	})
+	opts := healthyDeployment(t)
+	opts.ProbeSourceFactory = func(context.Context, *config.Config) (mail.Source, error) {
+		return rangeIgnoringSource{Source: adapter}, nil
+	}
+	ts := newLocalHTTPServer(t, opts)
+	defer ts.Close()
+
+	resp, err := http.Post(ts.URL+"/v1/probe/imap", "application/json", bytes.NewBufferString(`{"account":"rs_info"}`))
+	if err != nil {
+		t.Fatalf("POST probe: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	env := decodeEnvelope(t, resp.Body)
+	var probe api.ProbeIMAPResponse
+	if err := env.DecodeResult(&probe); err != nil {
+		t.Fatalf("decode probe: %v", err)
+	}
+	if probe.Status != api.ProbeStatusFailed {
+		t.Fatalf("probe status = %q, want failed", probe.Status)
+	}
+	check := probeCheckByID(t, probe, "uid_behavior")
+	if check.Status != api.ProbeStatusFailed || check.Code != "uid_range_mismatch" {
+		t.Fatalf("uid_behavior check = %+v", check)
+	}
+}
+
+func TestProbeIMAPEndpointRequiresUIDRangeFixture(t *testing.T) {
+	adapter := mailfake.NewAdapter(map[string]map[string][]mailfake.Message{
+		"rs_info": {"INBOX": {{UID: 10, VisibleByPolicy: true}}},
+	})
+	ts := newLocalHTTPServer(t, probeDeployment(t, adapter))
+	defer ts.Close()
+
+	probe := postProbeIMAP(t, ts)
+
+	check := probeCheckByID(t, probe, "uid_behavior")
+	if check.Status != api.ProbeStatusInconclusive || check.Code != "fixture_required" {
+		t.Fatalf("uid_behavior check = %+v", check)
+	}
+}
+
+func TestProbeIMAPEndpointRejectsEmptyFolderList(t *testing.T) {
+	adapter := mailfake.NewAdapter(map[string]map[string][]mailfake.Message{
+		"rs_info": {},
+	})
+	ts := newLocalHTTPServer(t, probeDeployment(t, adapter))
+	defer ts.Close()
+
+	probe := postProbeIMAP(t, ts)
+
+	check := probeCheckByID(t, probe, "folder_listing")
+	if check.Status != api.ProbeStatusInconclusive || check.Code != "fixture_required" {
+		t.Fatalf("folder_listing check = %+v", check)
+	}
+}
+
+func TestProbeIMAPEndpointRequiresUIDState(t *testing.T) {
+	adapter := mailfake.NewAdapter(map[string]map[string][]mailfake.Message{
+		"rs_info": {"INBOX": {{UID: 10, VisibleByPolicy: true}, {UID: 20, VisibleByPolicy: true}}},
+	})
+	adapter.SetUIDState("rs_info", "INBOX", 0, 0)
+	ts := newLocalHTTPServer(t, probeDeployment(t, adapter))
+	defer ts.Close()
+
+	probe := postProbeIMAP(t, ts)
+
+	check := probeCheckByID(t, probe, "folder_selection")
+	if check.Status != api.ProbeStatusInconclusive || check.Code != "uid_state_required" {
+		t.Fatalf("folder_selection check = %+v", check)
+	}
+}
+
+func TestProbeIMAPEndpointRequiresEachDomainHeaderFixture(t *testing.T) {
+	adapter := mailfake.NewAdapter(map[string]map[string][]mailfake.Message{
+		"rs_info": {"INBOX": {{UID: 10, VisibleByPolicy: true}}},
+	})
+	adapter.SetSearchResult("rs_info", "INBOX", "From", "regenerativ.ch", []mail.UID{10})
+	adapter.SetSearchResult("rs_info", "INBOX", "To", "regenerativ.ch", nil)
+	adapter.SetSearchResult("rs_info", "INBOX", "Cc", "regenerativ.ch", nil)
+	adapter.SetSearchResult("rs_info", "INBOX", "Bcc", "regenerativ.ch", nil)
+	setNegativeDomainHeaderResults(adapter, "rs_info", []string{"INBOX"})
+	opts := probeDeployment(t, adapter)
+	if err := os.WriteFile(opts.ConfigPath, []byte(domainConfig), 0o640); err != nil {
+		t.Fatalf("write domain config: %v", err)
+	}
+	ts := newLocalHTTPServer(t, opts)
+	defer ts.Close()
+
+	resp, err := http.Post(ts.URL+"/v1/probe/imap", "application/json", bytes.NewBufferString(`{"account":"rs_info"}`))
+	if err != nil {
+		t.Fatalf("POST probe: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	env := decodeEnvelope(t, resp.Body)
+	var probe api.ProbeIMAPResponse
+	if err := env.DecodeResult(&probe); err != nil {
+		t.Fatalf("decode probe: %v", err)
+	}
+	check := probeCheckByID(t, probe, "domain_header_search")
+	if check.Status != api.ProbeStatusInconclusive || check.Code != "fixture_required" {
+		t.Fatalf("domain_header_search check = %+v", check)
+	}
+	if !strings.Contains(check.Detail, "from_count=1") || !strings.Contains(check.Detail, "to_count=0") {
+		t.Fatalf("domain_header_search detail = %q", check.Detail)
+	}
+}
+
+func TestProbeIMAPEndpointRejectsOverBroadDomainHeaderSearch(t *testing.T) {
+	adapter := mailfake.NewAdapter(map[string]map[string][]mailfake.Message{
+		"rs_info": {"INBOX": {
+			{UID: 10, VisibleByPolicy: true},
+			{UID: 20, VisibleByPolicy: false},
+		}},
+	})
+	for _, header := range []string{"From", "To", "Cc", "Bcc"} {
+		adapter.SetSearchResult("rs_info", "INBOX", header, "regenerativ.ch", []mail.UID{10, 20})
+	}
+	opts := probeDeployment(t, adapter)
+	if err := os.WriteFile(opts.ConfigPath, []byte(domainConfig), 0o640); err != nil {
+		t.Fatalf("write domain config: %v", err)
+	}
+	ts := newLocalHTTPServer(t, opts)
+	defer ts.Close()
+
+	probe := postProbeIMAP(t, ts)
+
+	check := probeCheckByID(t, probe, "domain_header_search")
+	if check.Status != api.ProbeStatusFailed || check.Code != "header_search_overbroad" {
+		t.Fatalf("domain_header_search check = %+v", check)
+	}
+}
+
+func TestProbeIMAPEndpointChecksAllDomainsAndSentBccFolder(t *testing.T) {
+	adapter := mailfake.NewAdapter(map[string]map[string][]mailfake.Message{
+		"rs_info": {
+			"INBOX": {{UID: 10, VisibleByPolicy: true}, {UID: 11, VisibleByPolicy: true}},
+			"Sent":  {{UID: 30, VisibleByPolicy: true}},
+		},
+	})
+	for _, domain := range []string{"regenerativ.ch", "example.org"} {
+		for _, header := range []string{"From", "To", "Cc"} {
+			adapter.SetSearchResult("rs_info", "INBOX", header, domain, []mail.UID{10})
+		}
+		adapter.SetSearchResult("rs_info", "Sent", "Bcc", domain, []mail.UID{30})
+	}
+	setNegativeDomainHeaderResults(adapter, "rs_info", []string{"INBOX", "Sent"})
+	opts := probeDeployment(t, adapter)
+	if err := os.WriteFile(opts.ConfigPath, []byte(multiDomainSentConfig), 0o640); err != nil {
+		t.Fatalf("write domain config: %v", err)
+	}
+	ts := newLocalHTTPServer(t, opts)
+	defer ts.Close()
+
+	probe := postProbeIMAP(t, ts)
+
+	check := probeCheckByID(t, probe, "domain_header_search")
+	if check.Status != api.ProbeStatusPassed || check.Code != "header_search_ok" {
+		t.Fatalf("domain_header_search check = %+v", check)
+	}
+	calls := adapter.CallsSnapshot()
+	var foundSecondDomain, foundSentBcc bool
+	for _, call := range calls {
+		if call.Method != "search" {
+			continue
+		}
+		if call.Target == "rs_info@INBOX" && call.Payload == "from:example.org" {
+			foundSecondDomain = true
+		}
+		if call.Target == "rs_info@Sent" && call.Payload == "bcc:example.org" {
+			foundSentBcc = true
+		}
+	}
+	if !foundSecondDomain || !foundSentBcc {
+		t.Fatalf("domain probe calls missing second domain or sent bcc: %#v", calls)
+	}
+}
+
+func TestProbeIMAPEndpointExercisesReadStatePreviewFixture(t *testing.T) {
+	adapter := mailfake.NewAdapter(map[string]map[string][]mailfake.Message{
+		"rs_info": {"INBOX": {{UID: 10, VisibleByPolicy: true, Body: "preview fixture"}, {UID: 20, VisibleByPolicy: true}}},
+	})
+	ts := newLocalHTTPServer(t, probeDeployment(t, adapter))
+	defer ts.Close()
+
+	probe := postProbeIMAP(t, ts)
+
+	check := probeCheckByID(t, probe, "read_state")
+	if check.Status != api.ProbeStatusPassed || check.Code != "body_peek_ok" {
+		t.Fatalf("read_state check = %+v", check)
 	}
 }
 

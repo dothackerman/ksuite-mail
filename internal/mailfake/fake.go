@@ -53,12 +53,14 @@ type Adapter struct {
 }
 
 const (
-	methodSelect  = "select"
-	methodSearch  = "search"
-	methodList    = "list"
-	methodHeaders = "headers"
-	methodFetch   = "fetch"
-	methodPreview = "preview"
+	methodCapability = "capability"
+	methodFolders    = "folders"
+	methodSelect     = "select"
+	methodSearch     = "search"
+	methodList       = "list"
+	methodHeaders    = "headers"
+	methodFetch      = "fetch"
+	methodPreview    = "preview"
 )
 
 const (
@@ -138,6 +140,16 @@ func (a *Adapter) SetUIDVALIDITY(account, folder string, uidvalidity uint64) {
 	fd := a.ensureFolderLocked(account, folder)
 	fd.UIDVALIDITY = uidvalidity
 	fd.UIDNEXT = 1
+	a.seed[account][folder] = *fd
+}
+
+// SetUIDState updates the folder UID state returned by SelectFolder.
+func (a *Adapter) SetUIDState(account, folder string, uidvalidity, uidnext uint64) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	fd := a.ensureFolderLocked(account, folder)
+	fd.UIDVALIDITY = uidvalidity
+	fd.UIDNEXT = uidnext
 	a.seed[account][folder] = *fd
 }
 
@@ -274,6 +286,31 @@ func (a *Adapter) setFailure(method, accountFolder string, arg string, err error
 	}
 	fd.FailureByMethod[failureKey(method, account, folder, arg)] = err
 	a.seed[account][folder] = *fd
+}
+
+// Capabilities returns a stable sanitized capability list for probe tests.
+func (a *Adapter) Capabilities(_ context.Context, acct config.Account) ([]string, error) {
+	a.appendCall(methodCapability, acct.ID, "", "capability")
+	if err := a.checkFailure(methodCapability, acct.ID, "", ""); err != nil {
+		return nil, err
+	}
+	return []string{"IMAP4rev1", "UIDPLUS", "CONDSTORE"}, nil
+}
+
+// Folders returns sanitized folder names from the fixture seed.
+func (a *Adapter) Folders(_ context.Context, acct config.Account) ([]string, error) {
+	a.appendCall(methodFolders, acct.ID, "", "folders")
+	if err := a.checkFailure(methodFolders, acct.ID, "", ""); err != nil {
+		return nil, err
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	folders := make([]string, 0, len(a.seed[acct.ID]))
+	for folder := range a.seed[acct.ID] {
+		folders = append(folders, folder)
+	}
+	sort.Strings(folders)
+	return folders, nil
 }
 
 // SelectFolder simulates IMAP folder SELECT/EXAMINE and returns folder metadata.

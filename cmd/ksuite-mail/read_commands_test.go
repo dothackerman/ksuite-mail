@@ -228,6 +228,38 @@ func TestProbeCommandReachesDaemonPath(t *testing.T) {
 	}
 }
 
+func TestProbeCommandFailsWhenProbeResultFailed(t *testing.T) {
+	env, err := api.OK(api.ProbeIMAPResponse{
+		Account: "rs_info",
+		Status:  api.ProbeStatusFailed,
+		Checks:  []api.ProbeCheck{{ID: "capability", Status: api.ProbeStatusFailed, Code: "remote_failed"}},
+	})
+	if err != nil {
+		t.Fatalf("api.OK: %v", err)
+	}
+	socket, _ := startReadCommandSocketWithEnvelope(t, env)
+	code := runProbe([]string{"imap", "--socket", socket, "--account", "rs_info", "--json"})
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1", code)
+	}
+}
+
+func TestProbeCommandAllowsInconclusiveProbeResult(t *testing.T) {
+	env, err := api.OK(api.ProbeIMAPResponse{
+		Account: "rs_info",
+		Status:  api.ProbeStatusInconclusive,
+		Checks:  []api.ProbeCheck{{ID: "read_state", Status: api.ProbeStatusInconclusive, Code: "fixture_required"}},
+	})
+	if err != nil {
+		t.Fatalf("api.OK: %v", err)
+	}
+	socket, _ := startReadCommandSocketWithEnvelope(t, env)
+	code := runProbe([]string{"imap", "--socket", socket, "--account", "rs_info", "--json"})
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+}
+
 func TestReadCommandClientTimeoutMatchesReadContext(t *testing.T) {
 	client := udsclient.NewWithTimeout("unused.sock", readCommandTimeout)
 	if got := client.Timeout(); got != readCommandTimeout {
@@ -255,6 +287,15 @@ type capturedReadRequest struct {
 
 func startReadCommandSocket(t *testing.T) (string, *[]capturedReadRequest) {
 	t.Helper()
+	env, err := api.OK(map[string]any{"ok": true})
+	if err != nil {
+		t.Fatalf("api.OK: %v", err)
+	}
+	return startReadCommandSocketWithEnvelope(t, env)
+}
+
+func startReadCommandSocketWithEnvelope(t *testing.T, env api.Envelope) (string, *[]capturedReadRequest) {
+	t.Helper()
 	socket := filepath.Join(t.TempDir(), "daemon.sock")
 	ln, err := net.Listen("unix", socket)
 	if err != nil {
@@ -273,12 +314,6 @@ func startReadCommandSocket(t *testing.T) (string, *[]capturedReadRequest) {
 			return
 		}
 		requests = append(requests, capturedReadRequest{path: r.URL.Path, body: body})
-		env, err := api.OK(map[string]any{"ok": true})
-		if err != nil {
-			t.Errorf("api.OK: %v", err)
-			w.WriteHeader(http.StatusInternalServerError)
-			return
-		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(env)
 	})}

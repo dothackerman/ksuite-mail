@@ -51,6 +51,8 @@ func (e localCacheError) Error() string { return e.err.Error() }
 func (e localCacheError) Unwrap() error { return e.err }
 
 type source interface {
+	Capabilities(ctx context.Context, acct config.Account) ([]string, error)
+	Folders(ctx context.Context, acct config.Account) ([]string, error)
 	SelectFolder(ctx context.Context, acct config.Account, folder string) (mail.RemoteFolderState, error)
 	SearchAllowed(ctx context.Context, acct config.Account, folder string, header string, value string, scope mail.UIDRange) ([]mail.UID, error)
 	ListUIDs(ctx context.Context, acct config.Account, folder string, scope mail.UIDRange) ([]mail.UID, error)

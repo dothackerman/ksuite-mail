@@ -74,7 +74,7 @@ func deploymentWithSource(t *testing.T, configBody string, sourceAdapter *mailfa
 	}
 	opts := Options{ConfigPath: cfgPath, SecretsPath: secPath, StateDir: stateDir}
 	if sourceAdapter != nil {
-		opts.SourceFactory = func(_ context.Context, _ *config.Config) (source, error) {
+		opts.SourceFactory = func(_ context.Context, _ *config.Config) (mail.Source, error) {
 			return sourceAdapter, nil
 		}
 	}
@@ -1329,7 +1329,7 @@ func TestRefreshAndLoadClosesRepositoryOnPostOpenError(t *testing.T) {
 	}
 	opts := deploymentWithSource(t, validFullConfig, nil)
 	cachePath := filepath.Join(opts.StateDir, "mail.db")
-	opts.SourceFactory = func(context.Context, *config.Config) (source, error) {
+	opts.SourceFactory = func(context.Context, *config.Config) (mail.Source, error) {
 		return nil, fmt.Errorf("source setup failed")
 	}
 	s := New(opts)

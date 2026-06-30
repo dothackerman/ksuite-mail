@@ -68,6 +68,20 @@ Outcome:
 - `passed`, `failed`, `inconclusive`, or `not_run`
 - bug issue when failed
 
+### UAT-IMAP-PROBE-002A Live Smoke Connectivity
+
+Expected behavior:
+
+- The daemon resolves the selected account credential internally.
+- The daemon opens the IMAP adapter path for the selected account.
+- Connectivity, capability, and folder-listing failures are reported only as stable safe error codes such as `remote_failed`, `remote_timeout`, or `source_unavailable`.
+- Raw run output, including provider text, stays local under `.uat-runs/<run-id>/`.
+
+Outcome:
+
+- `passed`, `failed`, `inconclusive`, or `not_run`
+- bug issue when failed
+
 ### UAT-IMAP-PROBE-003 UID State And Range Behavior
 
 Expected behavior:
@@ -144,6 +158,7 @@ Raw artifacts stay local under `.uat-runs/<run-id>/`.
 |---|---|---|---|
 | UAT-IMAP-PROBE-001 | not_run | | |
 | UAT-IMAP-PROBE-002 | not_run | | |
+| UAT-IMAP-PROBE-002A | not_run | | |
 | UAT-IMAP-PROBE-003 | not_run | | |
 | UAT-IMAP-PROBE-004 | not_run | | |
 | UAT-IMAP-PROBE-005 | not_run | | |
