@@ -5,9 +5,16 @@ package e2e
 import (
 	"bufio"
 	"bytes"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
+	"math/big"
 	"net"
 	"os"
 	"os/exec"
@@ -263,8 +270,12 @@ func TestProbeIMAPEndToEnd(t *testing.T) {
 	secPath := filepath.Join(work, "secrets.json")
 	stateDir := filepath.Join(work, "state")
 	sock := filepath.Join(work, "d.sock")
-	imapHost, imapPort := startFakeIMAPServer(t)
-	if err := os.WriteFile(cfgPath, []byte(e2eConfig(imapHost, imapPort, false)), 0o640); err != nil {
+	imapHost, imapPort, imapCAPEM := startFakeIMAPServer(t)
+	imapCAPath := filepath.Join(work, "fake-imap-ca.pem")
+	if err := os.WriteFile(imapCAPath, imapCAPEM, 0o600); err != nil {
+		t.Fatalf("write fake IMAP CA: %v", err)
+	}
+	if err := os.WriteFile(cfgPath, []byte(e2eConfig(imapHost, imapPort, true)), 0o640); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
 	if err := os.WriteFile(secPath,
@@ -277,6 +288,7 @@ func TestProbeIMAPEndToEnd(t *testing.T) {
 
 	daemonCmd := exec.Command(daemonBin,
 		"--config", cfgPath, "--secrets", secPath, "--state-dir", stateDir, "--socket", sock)
+	daemonCmd.Env = append(os.Environ(), "SSL_CERT_FILE="+imapCAPath)
 	run := startDaemon(t, daemonCmd)
 	waitForSocket(t, sock, run)
 
@@ -318,15 +330,17 @@ func TestProbeIMAPEndToEnd(t *testing.T) {
 	}
 }
 
-func startFakeIMAPServer(t *testing.T) (string, int) {
+func startFakeIMAPServer(t *testing.T) (string, int, []byte) {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	cert, caPEM := e2eTestCertificate(t)
+	base, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		if errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.EACCES) || strings.Contains(err.Error(), "operation not permitted") {
 			t.Skipf("TCP listener denied by environment: %v", err)
 		}
 		t.Fatalf("listen fake imap: %v", err)
 	}
+	ln := tls.NewListener(base, &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12})
 	t.Cleanup(func() { _ = ln.Close() })
 	go func() {
 		for {
@@ -345,7 +359,37 @@ func startFakeIMAPServer(t *testing.T) (string, int) {
 	if _, err := fmt.Sscanf(portText, "%d", &port); err != nil {
 		t.Fatalf("parse fake imap port: %v", err)
 	}
-	return host, port
+	return host, port, caPEM
+}
+
+func e2eTestCertificate(t *testing.T) (tls.Certificate, []byte) {
+	t.Helper()
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate fake IMAP key: %v", err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "127.0.0.1"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+		IPAddresses:           []net.IP{net.ParseIP("127.0.0.1")},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatalf("create fake IMAP certificate: %v", err)
+	}
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})
+	cert, err := tls.X509KeyPair(certPEM, keyPEM)
+	if err != nil {
+		t.Fatalf("parse fake IMAP certificate: %v", err)
+	}
+	return cert, certPEM
 }
 
 func serveFakeIMAP(conn net.Conn) {
