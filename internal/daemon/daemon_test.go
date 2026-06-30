@@ -38,6 +38,22 @@ policy = "full"
 folders = ["INBOX"]
 `
 
+const domainConfig = `[mail]
+default_limit = 50
+
+[[mail.accounts]]
+id = "rs_info"
+email = "info@example.com"
+host = "imap.example.com"
+port = 993
+tls = true
+username = "info@example.com"
+password_ref = { source = "file", provider = "local", id = "/ksuite-mail/rs_info/password" }
+policy = "domain"
+domains = ["regenerativ.ch"]
+folders = ["INBOX"]
+`
+
 func healthyDeployment(t *testing.T) daemon.Options {
 	t.Helper()
 	dir := t.TempDir()
@@ -60,7 +76,7 @@ func healthyDeployment(t *testing.T) daemon.Options {
 func probeDeployment(t *testing.T, adapter *mailfake.Adapter) daemon.Options {
 	t.Helper()
 	opts := healthyDeployment(t)
-	opts.SourceFactory = func(context.Context, *config.Config) (mail.Source, error) {
+	opts.ProbeSourceFactory = func(context.Context, *config.Config) (mail.Source, error) {
 		return adapter, nil
 	}
 	return opts
@@ -73,6 +89,25 @@ func decodeEnvelope(t *testing.T, body io.Reader) api.Envelope {
 		t.Fatalf("decode envelope: %v", err)
 	}
 	return env
+}
+
+func probeCheckByID(t *testing.T, probe api.ProbeIMAPResponse, id string) api.ProbeCheck {
+	t.Helper()
+	for _, check := range probe.Checks {
+		if check.ID == id {
+			return check
+		}
+	}
+	t.Fatalf("probe check %q missing from %+v", id, probe.Checks)
+	return api.ProbeCheck{}
+}
+
+type rangeIgnoringSource struct {
+	mail.Source
+}
+
+func (s rangeIgnoringSource) ListUIDs(ctx context.Context, acct config.Account, folder string, _ mail.UIDRange) ([]mail.UID, error) {
+	return s.Source.ListUIDs(ctx, acct, folder, mail.UIDRange{})
 }
 
 func newLocalHTTPServer(t *testing.T, opts daemon.Options) *httptest.Server {
@@ -213,6 +248,34 @@ func TestProbeIMAPEndpointValidatesAccountAndRunsLiveChecklist(t *testing.T) {
 	}
 }
 
+func TestProbeIMAPEndpointUsesProbeSourceWithoutReadSource(t *testing.T) {
+	adapter := mailfake.NewAdapter(map[string]map[string][]mailfake.Message{
+		"rs_info": {"INBOX": {{UID: 10, VisibleByPolicy: true}}},
+	})
+	opts := healthyDeployment(t)
+	opts.SourceFactory = func(context.Context, *config.Config) (mail.Source, error) {
+		return nil, errors.New("read source should not be used by probe")
+	}
+	opts.ProbeSourceFactory = func(context.Context, *config.Config) (mail.Source, error) {
+		return adapter, nil
+	}
+	ts := newLocalHTTPServer(t, opts)
+	defer ts.Close()
+
+	resp, err := http.Post(ts.URL+"/v1/probe/imap", "application/json", bytes.NewBufferString(`{"account":"rs_info"}`))
+	if err != nil {
+		t.Fatalf("POST probe: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	env := decodeEnvelope(t, resp.Body)
+	if env.Status != api.StatusOK {
+		t.Fatalf("envelope status = %q, want ok", env.Status)
+	}
+	if calls := adapter.CallsSnapshot(); len(calls) == 0 || calls[0].Method != "capability" {
+		t.Fatalf("probe source was not used, calls=%#v", calls)
+	}
+}
+
 func TestProbeIMAPEndpointSanitizesLiveAdapterFailure(t *testing.T) {
 	adapter := mailfake.NewAdapter(map[string]map[string][]mailfake.Message{
 		"rs_info": {"INBOX": {}},
@@ -254,6 +317,81 @@ func TestProbeIMAPEndpointSanitizesLiveAdapterFailure(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("capability check missing")
+	}
+	if calls := adapter.CallsSnapshot(); len(calls) != 1 || calls[0].Method != "capability" {
+		t.Fatalf("probe should stop after first source failure, calls=%#v", calls)
+	}
+	for _, check := range probe.Checks {
+		switch check.ID {
+		case "folder_listing", "folder_selection", "uid_behavior", "read_state":
+			if check.Code != "prerequisite_failed" {
+				t.Fatalf("%s code = %q, want prerequisite_failed", check.ID, check.Code)
+			}
+		}
+	}
+}
+
+func TestProbeIMAPEndpointFailsUIDRangeMismatch(t *testing.T) {
+	adapter := mailfake.NewAdapter(map[string]map[string][]mailfake.Message{
+		"rs_info": {"INBOX": {{UID: 10, VisibleByPolicy: true}, {UID: 20, VisibleByPolicy: true}}},
+	})
+	opts := healthyDeployment(t)
+	opts.ProbeSourceFactory = func(context.Context, *config.Config) (mail.Source, error) {
+		return rangeIgnoringSource{Source: adapter}, nil
+	}
+	ts := newLocalHTTPServer(t, opts)
+	defer ts.Close()
+
+	resp, err := http.Post(ts.URL+"/v1/probe/imap", "application/json", bytes.NewBufferString(`{"account":"rs_info"}`))
+	if err != nil {
+		t.Fatalf("POST probe: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	env := decodeEnvelope(t, resp.Body)
+	var probe api.ProbeIMAPResponse
+	if err := env.DecodeResult(&probe); err != nil {
+		t.Fatalf("decode probe: %v", err)
+	}
+	if probe.Status != api.ProbeStatusFailed {
+		t.Fatalf("probe status = %q, want failed", probe.Status)
+	}
+	check := probeCheckByID(t, probe, "uid_behavior")
+	if check.Status != api.ProbeStatusFailed || check.Code != "uid_range_mismatch" {
+		t.Fatalf("uid_behavior check = %+v", check)
+	}
+}
+
+func TestProbeIMAPEndpointRequiresEachDomainHeaderFixture(t *testing.T) {
+	adapter := mailfake.NewAdapter(map[string]map[string][]mailfake.Message{
+		"rs_info": {"INBOX": {{UID: 10, VisibleByPolicy: true}}},
+	})
+	adapter.SetSearchResult("rs_info", "INBOX", "From", "regenerativ.ch", []mail.UID{10})
+	adapter.SetSearchResult("rs_info", "INBOX", "To", "regenerativ.ch", nil)
+	adapter.SetSearchResult("rs_info", "INBOX", "Cc", "regenerativ.ch", nil)
+	adapter.SetSearchResult("rs_info", "INBOX", "Bcc", "regenerativ.ch", nil)
+	opts := probeDeployment(t, adapter)
+	if err := os.WriteFile(opts.ConfigPath, []byte(domainConfig), 0o640); err != nil {
+		t.Fatalf("write domain config: %v", err)
+	}
+	ts := newLocalHTTPServer(t, opts)
+	defer ts.Close()
+
+	resp, err := http.Post(ts.URL+"/v1/probe/imap", "application/json", bytes.NewBufferString(`{"account":"rs_info"}`))
+	if err != nil {
+		t.Fatalf("POST probe: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	env := decodeEnvelope(t, resp.Body)
+	var probe api.ProbeIMAPResponse
+	if err := env.DecodeResult(&probe); err != nil {
+		t.Fatalf("decode probe: %v", err)
+	}
+	check := probeCheckByID(t, probe, "domain_header_search")
+	if check.Status != api.ProbeStatusInconclusive || check.Code != "fixture_required" {
+		t.Fatalf("domain_header_search check = %+v", check)
+	}
+	if !strings.Contains(check.Detail, "from_count=1") || !strings.Contains(check.Detail, "to_count=0") {
+		t.Fatalf("domain_header_search detail = %q", check.Detail)
 	}
 }
 

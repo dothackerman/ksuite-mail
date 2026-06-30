@@ -6,6 +6,7 @@ package imapadapter
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"net"
 	"sort"
 	"strconv"
@@ -27,6 +28,7 @@ const defaultTimeout = 20 * time.Second
 type Source struct {
 	secretsPath string
 	timeout     time.Duration
+	tlsConfig   *tls.Config
 }
 
 // New returns a live IMAP source backed by the daemon-owned secrets file.
@@ -44,7 +46,7 @@ func (s *Source) Capabilities(ctx context.Context, acct config.Account) ([]strin
 
 	caps, err := c.client.Capability().Wait()
 	if err != nil {
-		return nil, err
+		return nil, normalizeCommandError(err)
 	}
 	out := make([]string, 0, len(caps))
 	for cap := range caps {
@@ -67,7 +69,7 @@ func (s *Source) Folders(ctx context.Context, acct config.Account) ([]string, er
 
 	listed, err := c.client.List("", "*", nil).Collect()
 	if err != nil {
-		return nil, err
+		return nil, normalizeCommandError(err)
 	}
 	out := make([]string, 0, len(listed))
 	for _, folder := range listed {
@@ -93,7 +95,7 @@ func (s *Source) SelectFolder(ctx context.Context, acct config.Account, folder s
 		CondStore: caps.Has(imap.CapCondStore),
 	}).Wait()
 	if err != nil {
-		return mail.RemoteFolderState{}, err
+		return mail.RemoteFolderState{}, normalizeCommandError(err)
 	}
 	return mail.RemoteFolderState{
 		UIDVALIDITY:   uint64(data.UIDValidity),
@@ -110,7 +112,7 @@ func (s *Source) SearchAllowed(ctx context.Context, acct config.Account, folder 
 	}
 	defer c.close()
 	if _, err := c.client.Select(folder, &imap.SelectOptions{ReadOnly: true}).Wait(); err != nil {
-		return nil, err
+		return nil, normalizeCommandError(err)
 	}
 
 	criteria := &imap.SearchCriteria{
@@ -121,7 +123,7 @@ func (s *Source) SearchAllowed(ctx context.Context, acct config.Account, folder 
 	}
 	data, err := c.client.UIDSearch(criteria, nil).Wait()
 	if err != nil {
-		return nil, err
+		return nil, normalizeCommandError(err)
 	}
 	return toMailUIDs(data.AllUIDs()), nil
 }
@@ -134,7 +136,7 @@ func (s *Source) ListUIDs(ctx context.Context, acct config.Account, folder strin
 	}
 	defer c.close()
 	if _, err := c.client.Select(folder, &imap.SelectOptions{ReadOnly: true}).Wait(); err != nil {
-		return nil, err
+		return nil, normalizeCommandError(err)
 	}
 
 	criteria := &imap.SearchCriteria{}
@@ -143,7 +145,7 @@ func (s *Source) ListUIDs(ctx context.Context, acct config.Account, folder strin
 	}
 	data, err := c.client.UIDSearch(criteria, nil).Wait()
 	if err != nil {
-		return nil, err
+		return nil, normalizeCommandError(err)
 	}
 	return toMailUIDs(data.AllUIDs()), nil
 }
@@ -170,6 +172,9 @@ func (c liveConn) close() {
 }
 
 func (s *Source) connect(ctx context.Context, acct config.Account) (liveConn, error) {
+	if acct.TLS == nil || !*acct.TLS {
+		return liveConn{}, mail.ErrSourceUnavailable
+	}
 	password, err := s.password(acct)
 	if err != nil {
 		return liveConn{}, err
@@ -180,30 +185,76 @@ func (s *Source) connect(ctx context.Context, acct config.Account) (liveConn, er
 		timeout = defaultTimeout
 	}
 	dialer := &net.Dialer{Timeout: timeout}
+	deadline := time.Now().Add(timeout)
 	if deadline, ok := ctx.Deadline(); ok {
 		if remaining := time.Until(deadline); remaining > 0 && remaining < timeout {
 			dialer.Timeout = remaining
 		}
 	}
+	if ctxDeadline, ok := ctx.Deadline(); ok && ctxDeadline.Before(deadline) {
+		deadline = ctxDeadline
+	}
 
+	tlsConfig := s.connectionTLSConfig(acct)
 	opts := &imapclient.Options{
-		TLSConfig: &tls.Config{ServerName: acct.Host, MinVersion: tls.VersionTLS12},
-		Dialer:    dialer,
+		TLSConfig: tlsConfig,
 	}
-	var client *imapclient.Client
-	if acct.TLS != nil && *acct.TLS {
-		client, err = imapclient.DialTLS(address, opts)
-	} else {
-		client, err = imapclient.DialInsecure(address, opts)
-	}
+	conn, err := tls.DialWithDialer(dialer, "tcp", address, tlsConfig)
 	if err != nil {
-		return liveConn{}, err
+		return liveConn{}, normalizeCommandError(err)
 	}
+	boundedConn := deadlineConn{Conn: conn, deadline: deadline}
+	if err := boundedConn.SetDeadline(deadline); err != nil {
+		_ = conn.Close()
+		return liveConn{}, normalizeCommandError(err)
+	}
+	client := imapclient.New(boundedConn, opts)
 	if err := client.Login(acct.Username, password).Wait(); err != nil {
 		_ = client.Close()
-		return liveConn{}, err
+		return liveConn{}, normalizeCommandError(err)
 	}
 	return liveConn{client: client}, nil
+}
+
+type deadlineConn struct {
+	net.Conn
+	deadline time.Time
+}
+
+func (c deadlineConn) SetDeadline(t time.Time) error {
+	return c.Conn.SetDeadline(capDeadline(t, c.deadline))
+}
+
+func (c deadlineConn) SetReadDeadline(t time.Time) error {
+	return c.Conn.SetReadDeadline(capDeadline(t, c.deadline))
+}
+
+func (c deadlineConn) SetWriteDeadline(t time.Time) error {
+	return c.Conn.SetWriteDeadline(capDeadline(t, c.deadline))
+}
+
+func capDeadline(next, max time.Time) time.Time {
+	if max.IsZero() {
+		return next
+	}
+	if next.IsZero() || max.Before(next) {
+		return max
+	}
+	return next
+}
+
+func (s *Source) connectionTLSConfig(acct config.Account) *tls.Config {
+	if s.tlsConfig != nil {
+		cfg := s.tlsConfig.Clone()
+		if cfg.ServerName == "" {
+			cfg.ServerName = acct.Host
+		}
+		if cfg.MinVersion == 0 {
+			cfg.MinVersion = tls.VersionTLS12
+		}
+		return cfg
+	}
+	return &tls.Config{ServerName: acct.Host, MinVersion: tls.VersionTLS12}
 }
 
 func (s *Source) password(acct config.Account) (string, error) {
@@ -266,6 +317,23 @@ func toMailUIDs(uids []imap.UID) []mail.UID {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
 	return out
+}
+
+func normalizeCommandError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return context.DeadlineExceeded
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return context.DeadlineExceeded
+	}
+	if strings.Contains(strings.ToLower(err.Error()), "i/o timeout") {
+		return context.DeadlineExceeded
+	}
+	return err
 }
 
 var _ mail.Source = (*Source)(nil)

@@ -57,7 +57,7 @@ func main() {
 		SecretsPath: *secretsPath,
 		StateDir:    *stateDir,
 		Logger:      log,
-		SourceFactory: func(context.Context, *config.Config) (mail.Source, error) {
+		ProbeSourceFactory: func(context.Context, *config.Config) (mail.Source, error) {
 			return imapadapter.New(*secretsPath), nil
 		},
 	})

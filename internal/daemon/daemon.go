@@ -47,7 +47,7 @@ const (
 // source matches the narrow read-only adapter interface.
 type source = mail.Source
 
-// SourceFactory builds a source from runtime config.
+// SourceFactory builds a read-refresh source from runtime config.
 type SourceFactory func(ctx context.Context, cfg *config.Config) (mail.Source, error)
 
 // UnavailableSourceFactory keeps issue #3 production daemons explicit: read
@@ -95,11 +95,12 @@ func (unavailableSource) FetchBodyPreview(context.Context, config.Account, strin
 
 // Options configures the daemon's view of the deployment.
 type Options struct {
-	ConfigPath    string
-	SecretsPath   string
-	StateDir      string
-	Logger        *slog.Logger
-	SourceFactory SourceFactory
+	ConfigPath         string
+	SecretsPath        string
+	StateDir           string
+	Logger             *slog.Logger
+	SourceFactory      SourceFactory
+	ProbeSourceFactory SourceFactory
 }
 
 // Server serves the local API.
@@ -211,7 +212,7 @@ func (s *Server) handleProbeIMAP(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusFailedDependency, probeCredentialErrorCode(err), "selected account credential is unavailable")
 		return
 	}
-	src, err := s.sourceForConfig(r.Context(), cfg)
+	src, err := s.probeSourceForConfig(r.Context(), cfg)
 	if err != nil {
 		s.writeError(w, http.StatusInternalServerError, "source_unavailable", "mail source is unavailable")
 		return
@@ -919,6 +920,13 @@ func (s *Server) sourceForConfig(ctx context.Context, cfg *config.Config) (sourc
 	return s.opts.SourceFactory(ctx, cfg)
 }
 
+func (s *Server) probeSourceForConfig(ctx context.Context, cfg *config.Config) (source, error) {
+	if s.opts.ProbeSourceFactory == nil {
+		return nil, nil
+	}
+	return s.opts.ProbeSourceFactory(ctx, cfg)
+}
+
 func (s *Server) openRepository() (*cache.Repository, error) {
 	if err := cache.SeedFromStateDir(s.opts.StateDir); err != nil {
 		return nil, err
@@ -1215,16 +1223,29 @@ func probeIMAPResponse(ctx context.Context, src source, acct config.Account) api
 	caps, err := src.Capabilities(ctx, acct)
 	if err != nil {
 		checks = append(checks, probeFailure("capability", err))
-	} else {
-		checks = append(checks, probeCheck("capability", api.ProbeStatusPassed, "capability_ok", "capabilities="+strings.Join(caps, ",")))
+		checks = append(checks,
+			probeNotRun("folder_listing"),
+			probeNotRun("folder_selection"),
+			probeNotRun("uid_behavior"),
+			domainProbeNotRun(acct),
+			probeNotRun("read_state"),
+		)
+		return api.ProbeIMAPResponse{Account: acct.ID, Status: aggregateProbeStatus(checks), Checks: checks}
 	}
+	checks = append(checks, probeCheck("capability", api.ProbeStatusPassed, "capability_ok", "capabilities="+strings.Join(caps, ",")))
 
 	folders, err := src.Folders(ctx, acct)
 	if err != nil {
 		checks = append(checks, probeFailure("folder_listing", err))
-	} else {
-		checks = append(checks, probeCheck("folder_listing", api.ProbeStatusPassed, "list_ok", "folder_count="+strconv.Itoa(len(folders))))
+		checks = append(checks,
+			probeNotRun("folder_selection"),
+			probeNotRun("uid_behavior"),
+			domainProbeNotRun(acct),
+			probeNotRun("read_state"),
+		)
+		return api.ProbeIMAPResponse{Account: acct.ID, Status: aggregateProbeStatus(checks), Checks: checks}
 	}
+	checks = append(checks, probeCheck("folder_listing", api.ProbeStatusPassed, "list_ok", "folder_count="+strconv.Itoa(len(folders))))
 
 	folder := firstProbeFolder(acct)
 	if folder == "" {
@@ -1237,12 +1258,16 @@ func probeIMAPResponse(ctx context.Context, src source, acct config.Account) api
 		state, err := src.SelectFolder(ctx, acct, folder)
 		if err != nil {
 			checks = append(checks, probeFailure("folder_selection", err))
+			checks = append(checks,
+				probeNotRun("uid_behavior"),
+				domainProbeNotRun(acct),
+			)
 		} else {
 			detail := fmt.Sprintf("configured_folder=true uidvalidity=%d uidnext=%d highestmodseq=%d", state.UIDVALIDITY, state.UIDNEXT, state.HighestModSeq)
 			checks = append(checks, probeCheck("folder_selection", api.ProbeStatusPassed, "examine_ok", detail))
+			checks = append(checks, probeUIDBehavior(ctx, src, acct, folder))
+			checks = append(checks, probeDomainHeaders(ctx, src, acct, folder))
 		}
-		checks = append(checks, probeUIDBehavior(ctx, src, acct, folder))
-		checks = append(checks, probeDomainHeaders(ctx, src, acct, folder))
 	}
 
 	checks = append(checks, probeCheck("read_state", api.ProbeStatusInconclusive, "fixture_required", "BODY.PEEK read-state fixture is required"))
@@ -1262,6 +1287,9 @@ func probeUIDBehavior(ctx context.Context, src source, acct config.Account, fold
 	if err != nil {
 		return probeFailure("uid_behavior", err)
 	}
+	if len(ranged) != 1 || ranged[0] != uids[0] {
+		return probeCheck("uid_behavior", api.ProbeStatusFailed, "uid_range_mismatch", fmt.Sprintf("uid_count=%d range_count=%d", len(uids), len(ranged)))
+	}
 	return probeCheck("uid_behavior", api.ProbeStatusPassed, "uid_range_ok", fmt.Sprintf("uid_count=%d range_count=%d", len(uids), len(ranged)))
 }
 
@@ -1275,16 +1303,18 @@ func probeDomainHeaders(ctx context.Context, src source, acct config.Account, fo
 	domain := acct.Domains[0]
 	headers := []string{"From", "To", "Cc", "Bcc"}
 	counts := make([]string, 0, len(headers))
-	total := 0
+	missingFixture := false
 	for _, header := range headers {
 		uids, err := src.SearchAllowed(ctx, acct, folder, header, domain, mail.UIDRange{})
 		if err != nil {
 			return probeFailure("domain_header_search", err)
 		}
-		total += len(uids)
+		if len(uids) == 0 {
+			missingFixture = true
+		}
 		counts = append(counts, strings.ToLower(header)+"_count="+strconv.Itoa(len(uids)))
 	}
-	if total == 0 {
+	if missingFixture {
 		return probeCheck("domain_header_search", api.ProbeStatusInconclusive, "fixture_required", strings.Join(counts, " "))
 	}
 	return probeCheck("domain_header_search", api.ProbeStatusPassed, "header_search_ok", strings.Join(counts, " "))
@@ -1294,7 +1324,11 @@ func domainProbeNotRun(acct config.Account) api.ProbeCheck {
 	if acct.Policy == config.PolicyFull {
 		return probeCheck("domain_header_search", api.ProbeStatusNotApplicable, "full_policy", "full-policy accounts do not depend on domain-header filtering")
 	}
-	return probeCheck("domain_header_search", api.ProbeStatusInconclusive, "prerequisite_failed", "domain-header search was not run")
+	return probeNotRun("domain_header_search")
+}
+
+func probeNotRun(id string) api.ProbeCheck {
+	return probeCheck(id, api.ProbeStatusInconclusive, "prerequisite_failed", id+" was not run")
 }
 
 func firstProbeFolder(acct config.Account) string {

@@ -64,10 +64,14 @@ func runProbeIMAP(args []string) int {
 	}
 
 	emitJSON(env)
-	if env.Status == api.StatusOK {
-		return 0
+	if env.Status != api.StatusOK {
+		return 1
 	}
-	return 1
+	var probe api.ProbeIMAPResponse
+	if err := env.DecodeResult(&probe); err == nil && probe.Status == api.ProbeStatusFailed {
+		return 1
+	}
+	return 0
 }
 
 func probeValidationError(message string) int {
