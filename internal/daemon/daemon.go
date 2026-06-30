@@ -43,6 +43,7 @@ const (
 	maxReadWindow      = 1000
 	maxContextBudget   = 12 * 1024
 	defaultProbeBudget = 18 * time.Second
+	probeNegativeValue = "ksuite-mail-probe.invalid"
 )
 
 // source matches the narrow read-only adapter interface.
@@ -1257,6 +1258,16 @@ func probeIMAPResponse(ctx context.Context, src source, acct config.Account) api
 		)
 		return api.ProbeIMAPResponse{Account: acct.ID, Status: aggregateProbeStatus(checks), Checks: checks}
 	}
+	if len(folders) == 0 {
+		checks = append(checks,
+			probeCheck("folder_listing", api.ProbeStatusInconclusive, "fixture_required", "folder_count=0"),
+			probeNotRun("folder_selection"),
+			probeNotRun("uid_behavior"),
+			domainProbeNotRun(acct),
+			probeNotRun("read_state"),
+		)
+		return api.ProbeIMAPResponse{Account: acct.ID, Status: aggregateProbeStatus(checks), Checks: checks}
+	}
 	checks = append(checks, probeCheck("folder_listing", api.ProbeStatusPassed, "list_ok", "folder_count="+strconv.Itoa(len(folders))))
 
 	folder := firstProbeFolder(acct)
@@ -1265,6 +1276,7 @@ func probeIMAPResponse(ctx context.Context, src source, acct config.Account) api
 			probeCheck("folder_selection", api.ProbeStatusInconclusive, "no_configured_folder", "selected account has no configured folders"),
 			probeCheck("uid_behavior", api.ProbeStatusInconclusive, "no_configured_folder", "selected account has no configured folders"),
 			domainProbeNotRun(acct),
+			probeCheck("read_state", api.ProbeStatusInconclusive, "no_configured_folder", "selected account has no configured folders"),
 		)
 	} else {
 		state, err := src.SelectFolder(ctx, acct, folder)
@@ -1273,16 +1285,25 @@ func probeIMAPResponse(ctx context.Context, src source, acct config.Account) api
 			checks = append(checks,
 				probeNotRun("uid_behavior"),
 				domainProbeNotRun(acct),
+				probeNotRun("read_state"),
+			)
+		} else if state.UIDVALIDITY == 0 || state.UIDNEXT == 0 {
+			detail := fmt.Sprintf("configured_folder=true uidvalidity_present=%t uidnext_present=%t", state.UIDVALIDITY != 0, state.UIDNEXT != 0)
+			checks = append(checks, probeCheck("folder_selection", api.ProbeStatusInconclusive, "uid_state_required", detail))
+			checks = append(checks,
+				probeNotRun("uid_behavior"),
+				domainProbeNotRun(acct),
+				probeNotRun("read_state"),
 			)
 		} else {
 			detail := fmt.Sprintf("configured_folder=true uidvalidity=%d uidnext=%d highestmodseq=%d", state.UIDVALIDITY, state.UIDNEXT, state.HighestModSeq)
 			checks = append(checks, probeCheck("folder_selection", api.ProbeStatusPassed, "examine_ok", detail))
 			checks = append(checks, probeUIDBehavior(ctx, src, acct, folder))
-			checks = append(checks, probeDomainHeaders(ctx, src, acct, folder))
+			checks = append(checks, probeDomainHeaders(ctx, src, acct, folder, sentProbeFolder(acct, folder)))
+			checks = append(checks, probeReadState(ctx, src, acct, folder))
 		}
 	}
 
-	checks = append(checks, probeCheck("read_state", api.ProbeStatusInconclusive, "fixture_required", "BODY.PEEK read-state fixture is required"))
 	return api.ProbeIMAPResponse{Account: acct.ID, Status: aggregateProbeStatus(checks), Checks: checks}
 }
 
@@ -1291,8 +1312,8 @@ func probeUIDBehavior(ctx context.Context, src source, acct config.Account, fold
 	if err != nil {
 		return probeFailure("uid_behavior", err)
 	}
-	if len(uids) == 0 {
-		return probeCheck("uid_behavior", api.ProbeStatusInconclusive, "fixture_required", "no fixture UIDs available")
+	if len(uids) < 2 {
+		return probeCheck("uid_behavior", api.ProbeStatusInconclusive, "fixture_required", "at least two fixture UIDs are required")
 	}
 	scope := mail.UIDRange{Min: uint64(uids[0]), Max: uint64(uids[0])}
 	ranged, err := src.ListUIDs(ctx, acct, folder, scope)
@@ -1305,31 +1326,62 @@ func probeUIDBehavior(ctx context.Context, src source, acct config.Account, fold
 	return probeCheck("uid_behavior", api.ProbeStatusPassed, "uid_range_ok", fmt.Sprintf("uid_count=%d range_count=%d", len(uids), len(ranged)))
 }
 
-func probeDomainHeaders(ctx context.Context, src source, acct config.Account, folder string) api.ProbeCheck {
+func probeDomainHeaders(ctx context.Context, src source, acct config.Account, folder, sentFolder string) api.ProbeCheck {
 	if acct.Policy == config.PolicyFull {
 		return probeCheck("domain_header_search", api.ProbeStatusNotApplicable, "full_policy", "full-policy accounts do not depend on domain-header filtering")
 	}
 	if len(acct.Domains) == 0 {
 		return probeCheck("domain_header_search", api.ProbeStatusInconclusive, "no_domain", "domain-policy account has no configured domain")
 	}
-	domain := acct.Domains[0]
 	headers := []string{"From", "To", "Cc", "Bcc"}
-	counts := make([]string, 0, len(headers))
+	counts := make([]string, 0, len(headers)*len(acct.Domains))
 	missingFixture := false
-	for _, header := range headers {
-		uids, err := src.SearchAllowed(ctx, acct, folder, header, domain, mail.UIDRange{})
-		if err != nil {
-			return probeFailure("domain_header_search", err)
+	for _, domain := range acct.Domains {
+		domain = strings.TrimSpace(domain)
+		if domain == "" {
+			continue
 		}
-		if len(uids) == 0 {
-			missingFixture = true
+		for _, header := range headers {
+			targetFolder := folder
+			if header == "Bcc" && sentFolder != "" {
+				targetFolder = sentFolder
+			}
+			uids, err := src.SearchAllowed(ctx, acct, targetFolder, header, domain, mail.UIDRange{})
+			if err != nil {
+				return probeFailure("domain_header_search", err)
+			}
+			if len(uids) == 0 {
+				missingFixture = true
+			}
+			negativeUIDs, err := src.SearchAllowed(ctx, acct, targetFolder, header, probeNegativeValue, mail.UIDRange{})
+			if err != nil {
+				return probeFailure("domain_header_search", err)
+			}
+			if len(negativeUIDs) > 0 {
+				detail := fmt.Sprintf("header=%s domain_index_checked=true nonmatching_visible=true", strings.ToLower(header))
+				return probeCheck("domain_header_search", api.ProbeStatusFailed, "header_search_overbroad", detail)
+			}
+			counts = append(counts, strings.ToLower(header)+"_count="+strconv.Itoa(len(uids)))
 		}
-		counts = append(counts, strings.ToLower(header)+"_count="+strconv.Itoa(len(uids)))
 	}
 	if missingFixture {
 		return probeCheck("domain_header_search", api.ProbeStatusInconclusive, "fixture_required", strings.Join(counts, " "))
 	}
 	return probeCheck("domain_header_search", api.ProbeStatusPassed, "header_search_ok", strings.Join(counts, " "))
+}
+
+func probeReadState(ctx context.Context, src source, acct config.Account, folder string) api.ProbeCheck {
+	uids, err := src.ListUIDs(ctx, acct, folder, mail.UIDRange{})
+	if err != nil {
+		return probeFailure("read_state", err)
+	}
+	if len(uids) == 0 {
+		return probeCheck("read_state", api.ProbeStatusInconclusive, "fixture_required", "BODY.PEEK read-state fixture is required")
+	}
+	if _, err := src.FetchBodyPreview(ctx, acct, folder, uids[0], 1); err != nil {
+		return probeFailure("read_state", err)
+	}
+	return probeCheck("read_state", api.ProbeStatusPassed, "body_peek_ok", "body_peek_exercised=true")
 }
 
 func domainProbeNotRun(acct config.Account) api.ProbeCheck {
@@ -1350,6 +1402,19 @@ func firstProbeFolder(acct config.Account) string {
 		}
 	}
 	return ""
+}
+
+func sentProbeFolder(acct config.Account, fallback string) string {
+	for _, folder := range acct.Folders {
+		clean := strings.TrimSpace(folder)
+		if clean == "" {
+			continue
+		}
+		if strings.Contains(strings.ToLower(clean), "sent") {
+			return clean
+		}
+	}
+	return fallback
 }
 
 func probeFailure(id string, err error) api.ProbeCheck {

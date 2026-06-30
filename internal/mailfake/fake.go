@@ -143,6 +143,16 @@ func (a *Adapter) SetUIDVALIDITY(account, folder string, uidvalidity uint64) {
 	a.seed[account][folder] = *fd
 }
 
+// SetUIDState updates the folder UID state returned by SelectFolder.
+func (a *Adapter) SetUIDState(account, folder string, uidvalidity, uidnext uint64) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	fd := a.ensureFolderLocked(account, folder)
+	fd.UIDVALIDITY = uidvalidity
+	fd.UIDNEXT = uidnext
+	a.seed[account][folder] = *fd
+}
+
 // SetHighestModSeq updates the folder high-water modification sequence.
 func (a *Adapter) SetHighestModSeq(account, folder string, hms int64) {
 	a.mu.Lock()

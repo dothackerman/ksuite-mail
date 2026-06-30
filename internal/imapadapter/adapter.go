@@ -154,8 +154,30 @@ func (s *Source) FetchEnvelopes(context.Context, config.Account, string, []mail.
 	return nil, mail.ErrSourceUnavailable
 }
 
-func (s *Source) FetchBodyPreview(context.Context, config.Account, string, mail.UID, int) (string, error) {
-	return "", mail.ErrSourceUnavailable
+func (s *Source) FetchBodyPreview(ctx context.Context, acct config.Account, folder string, uid mail.UID, maxBytes int) (string, error) {
+	c, err := s.connect(ctx, acct)
+	if err != nil {
+		return "", err
+	}
+	defer c.close()
+	if _, err := c.client.Select(folder, &imap.SelectOptions{ReadOnly: true}).Wait(); err != nil {
+		return "", normalizeCommandError(err)
+	}
+
+	bodySection := &imap.FetchItemBodySection{Specifier: imap.PartSpecifierText, Peek: true}
+	if maxBytes > 0 {
+		bodySection.Partial = &imap.SectionPartial{Offset: 0, Size: int64(maxBytes)}
+	}
+	messages, err := c.client.Fetch(imap.UIDSetNum(imap.UID(uid)), &imap.FetchOptions{
+		BodySection: []*imap.FetchItemBodySection{bodySection},
+	}).Collect()
+	if err != nil {
+		return "", normalizeCommandError(err)
+	}
+	if len(messages) == 0 {
+		return "", nil
+	}
+	return string(messages[0].FindBodySection(bodySection)), nil
 }
 
 type liveConn struct {
@@ -163,7 +185,6 @@ type liveConn struct {
 }
 
 func (c liveConn) close() {
-	_ = c.client.Logout().Wait()
 	_ = c.client.Close()
 }
 
@@ -256,7 +277,6 @@ type rawIMAPConn struct {
 }
 
 func (c *rawIMAPConn) close() {
-	_ = c.commandOK("LOGOUT")
 	_ = c.conn.Close()
 }
 

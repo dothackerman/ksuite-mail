@@ -68,6 +68,41 @@ func TestSourceTimesOutWhenServerHangsAfterConnect(t *testing.T) {
 	}
 }
 
+func TestSourceDoesNotWaitForLogoutDuringCleanup(t *testing.T) {
+	ln, roots := newLogoutStallingTLSServer(t)
+	defer func() { _ = ln.Close() }()
+
+	host, portText, err := net.SplitHostPort(ln.Addr().String())
+	if err != nil {
+		t.Fatalf("split listener address: %v", err)
+	}
+	var port int
+	if _, err := fmt.Sscanf(portText, "%d", &port); err != nil {
+		t.Fatalf("parse port %q: %v", portText, err)
+	}
+	acct := testAccount(t)
+	acct.Host = host
+	acct.Port = port
+
+	src := &Source{
+		secretsPath: writeTestSecrets(t),
+		timeout:     750 * time.Millisecond,
+		tlsConfig:   &tls.Config{RootCAs: roots},
+	}
+
+	start := time.Now()
+	caps, err := src.Capabilities(context.Background(), acct)
+	if err != nil {
+		t.Fatalf("Capabilities: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 250*time.Millisecond {
+		t.Fatalf("Capabilities took %s, cleanup should not wait for LOGOUT", elapsed)
+	}
+	if got, want := fmt.Sprint(caps), "[IMAP4REV1]"; got != want {
+		t.Fatalf("capabilities = %s, want %s", got, want)
+	}
+}
+
 func TestSearchAllowedUsesHeaderSearchForAddressHeaders(t *testing.T) {
 	ln, roots, commands := newHeaderSearchTLSServer(t)
 	defer func() { _ = ln.Close() }()
@@ -138,6 +173,53 @@ func writeTestSecrets(t *testing.T) string {
 		t.Fatalf("write secrets: %v", err)
 	}
 	return path
+}
+
+func newLogoutStallingTLSServer(t *testing.T) (net.Listener, *x509.CertPool) {
+	t.Helper()
+	cert, roots := testCertificate(t)
+	base, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		if errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.EACCES) || strings.Contains(err.Error(), "operation not permitted") {
+			t.Skipf("TCP listener denied by environment: %v", err)
+		}
+		t.Fatalf("listen tcp: %v", err)
+	}
+	ln := tls.NewListener(base, &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12})
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		r := bufio.NewReader(conn)
+		w := bufio.NewWriter(conn)
+		writeIMAPLine(w, "* OK ready")
+		for {
+			line, err := r.ReadString('\n')
+			if err != nil {
+				return
+			}
+			fields := strings.Fields(strings.TrimRight(line, "\r\n"))
+			if len(fields) < 2 {
+				continue
+			}
+			tag := fields[0]
+			switch strings.ToUpper(fields[1]) {
+			case "LOGIN":
+				writeIMAPLine(w, tag+" OK LOGIN completed")
+			case "CAPABILITY":
+				writeIMAPLine(w, "* CAPABILITY IMAP4rev1")
+				writeIMAPLine(w, tag+" OK CAPABILITY completed")
+			case "LOGOUT":
+				time.Sleep(2 * time.Second)
+				return
+			default:
+				writeIMAPLine(w, tag+" BAD unsupported")
+			}
+		}
+	}()
+	return ln, roots
 }
 
 func newHangingTLSServer(t *testing.T) (net.Listener, *x509.CertPool) {
