@@ -17,7 +17,10 @@ import (
 	"time"
 
 	"github.com/dothackerman/ksuite-mail/internal/api"
+	"github.com/dothackerman/ksuite-mail/internal/config"
 	"github.com/dothackerman/ksuite-mail/internal/daemon"
+	"github.com/dothackerman/ksuite-mail/internal/mail"
+	"github.com/dothackerman/ksuite-mail/internal/mailfake"
 )
 
 const validConfig = `[mail]
@@ -52,6 +55,15 @@ func healthyDeployment(t *testing.T) daemon.Options {
 		t.Fatalf("write secrets: %v", err)
 	}
 	return daemon.Options{ConfigPath: cfgPath, SecretsPath: secPath, StateDir: stateDir}
+}
+
+func probeDeployment(t *testing.T, adapter *mailfake.Adapter) daemon.Options {
+	t.Helper()
+	opts := healthyDeployment(t)
+	opts.SourceFactory = func(context.Context, *config.Config) (mail.Source, error) {
+		return adapter, nil
+	}
+	return opts
 }
 
 func decodeEnvelope(t *testing.T, body io.Reader) api.Envelope {
@@ -130,8 +142,14 @@ func TestDoctorEndpointReturnsReport(t *testing.T) {
 	}
 }
 
-func TestProbeIMAPEndpointValidatesAccountAndReturnsStubChecklist(t *testing.T) {
-	ts := newLocalHTTPServer(t, healthyDeployment(t))
+func TestProbeIMAPEndpointValidatesAccountAndRunsLiveChecklist(t *testing.T) {
+	adapter := mailfake.NewAdapter(map[string]map[string][]mailfake.Message{
+		"rs_info": {
+			"INBOX":                  {{UID: 10, VisibleByPolicy: true}},
+			"private-folder-name-pw": {},
+		},
+	})
+	ts := newLocalHTTPServer(t, probeDeployment(t, adapter))
 	defer ts.Close()
 
 	resp, err := http.Post(ts.URL+"/v1/probe/imap", "application/json", bytes.NewBufferString(`{"account":"rs_info"}`))
@@ -169,11 +187,73 @@ func TestProbeIMAPEndpointValidatesAccountAndReturnsStubChecklist(t *testing.T) 
 	if checks["account_selection"] != api.ProbeStatusPassed {
 		t.Fatalf("account_selection status = %q, want %q", checks["account_selection"], api.ProbeStatusPassed)
 	}
+	if checks["capability"] != api.ProbeStatusPassed {
+		t.Fatalf("capability status = %q, want %q", checks["capability"], api.ProbeStatusPassed)
+	}
+	if checks["folder_listing"] != api.ProbeStatusPassed {
+		t.Fatalf("folder_listing status = %q, want %q", checks["folder_listing"], api.ProbeStatusPassed)
+	}
+	if checks["folder_selection"] != api.ProbeStatusPassed {
+		t.Fatalf("folder_selection status = %q, want %q", checks["folder_selection"], api.ProbeStatusPassed)
+	}
+	if checks["uid_behavior"] != api.ProbeStatusPassed {
+		t.Fatalf("uid_behavior status = %q, want %q", checks["uid_behavior"], api.ProbeStatusPassed)
+	}
 	if checks["domain_header_search"] != api.ProbeStatusNotApplicable {
 		t.Fatalf("domain_header_search status = %q, want %q", checks["domain_header_search"], api.ProbeStatusNotApplicable)
 	}
-	if strings.Contains(mustJSON(t, env), "pw") || strings.Contains(mustJSON(t, env), "CAPABILITY ") {
+	if strings.Contains(mustJSON(t, env), "pw") ||
+		strings.Contains(mustJSON(t, env), "private-folder-name") ||
+		strings.Contains(mustJSON(t, env), "CAPABILITY ") {
 		t.Fatalf("probe response leaked secret or raw command text: %+v", env)
+	}
+	calls := adapter.CallsSnapshot()
+	if len(calls) == 0 || calls[0].Method != "capability" {
+		t.Fatalf("expected probe to call live adapter path, calls=%#v", calls)
+	}
+}
+
+func TestProbeIMAPEndpointSanitizesLiveAdapterFailure(t *testing.T) {
+	adapter := mailfake.NewAdapter(map[string]map[string][]mailfake.Message{
+		"rs_info": {"INBOX": {}},
+	})
+	adapter.SetFailure("capability", "rs_info", "", "", errors.New("NO auth failed for info@example.com with pw and private text"))
+	ts := newLocalHTTPServer(t, probeDeployment(t, adapter))
+	defer ts.Close()
+
+	resp, err := http.Post(ts.URL+"/v1/probe/imap", "application/json", bytes.NewBufferString(`{"account":"rs_info"}`))
+	if err != nil {
+		t.Fatalf("POST probe: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	env := decodeEnvelope(t, resp.Body)
+	var probe api.ProbeIMAPResponse
+	if err := env.DecodeResult(&probe); err != nil {
+		t.Fatalf("decode probe: %v", err)
+	}
+	if probe.Status != api.ProbeStatusFailed {
+		t.Fatalf("probe status = %q, want failed", probe.Status)
+	}
+	raw := mustJSON(t, env)
+	for _, leak := range []string{"pw", "info@example.com", "private text", "auth failed"} {
+		if strings.Contains(raw, leak) {
+			t.Fatalf("probe failure leaked %q in %s", leak, raw)
+		}
+	}
+	found := false
+	for _, check := range probe.Checks {
+		if check.ID == "capability" {
+			found = true
+			if check.Code != "remote_failed" || check.Detail != "provider probe failed" {
+				t.Fatalf("capability check = %+v", check)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("capability check missing")
 	}
 }
 

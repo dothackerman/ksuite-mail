@@ -1,0 +1,271 @@
+// Package imapadapter keeps go-imap/v2 behind the daemon-side mail.Source
+// boundary. It never enables go-imap debug logging because that stream can
+// contain credentials and raw mailbox data.
+package imapadapter
+
+import (
+	"context"
+	"crypto/tls"
+	"net"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/emersion/go-imap/v2"
+	"github.com/emersion/go-imap/v2/imapclient"
+
+	"github.com/dothackerman/ksuite-mail/internal/config"
+	"github.com/dothackerman/ksuite-mail/internal/mail"
+	"github.com/dothackerman/ksuite-mail/internal/secrets"
+)
+
+const defaultTimeout = 20 * time.Second
+
+// Source resolves credentials daemon-side and opens short-lived IMAP sessions
+// for each read-only operation.
+type Source struct {
+	secretsPath string
+	timeout     time.Duration
+}
+
+// New returns a live IMAP source backed by the daemon-owned secrets file.
+func New(secretsPath string) *Source {
+	return &Source{secretsPath: secretsPath, timeout: defaultTimeout}
+}
+
+// Capabilities returns sanitized capability atoms after authenticating.
+func (s *Source) Capabilities(ctx context.Context, acct config.Account) ([]string, error) {
+	c, err := s.connect(ctx, acct)
+	if err != nil {
+		return nil, err
+	}
+	defer c.close()
+
+	caps, err := c.client.Capability().Wait()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(caps))
+	for cap := range caps {
+		clean := sanitizeCapability(string(cap))
+		if clean != "" {
+			out = append(out, clean)
+		}
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+// Folders returns sanitized provider folder names.
+func (s *Source) Folders(ctx context.Context, acct config.Account) ([]string, error) {
+	c, err := s.connect(ctx, acct)
+	if err != nil {
+		return nil, err
+	}
+	defer c.close()
+
+	listed, err := c.client.List("", "*", nil).Collect()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(listed))
+	for _, folder := range listed {
+		if clean := sanitizeFolder(folder.Mailbox); clean != "" {
+			out = append(out, clean)
+		}
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+// SelectFolder uses EXAMINE to retrieve read-only folder state.
+func (s *Source) SelectFolder(ctx context.Context, acct config.Account, folder string) (mail.RemoteFolderState, error) {
+	c, err := s.connect(ctx, acct)
+	if err != nil {
+		return mail.RemoteFolderState{}, err
+	}
+	defer c.close()
+
+	caps, _ := c.client.Capability().Wait()
+	data, err := c.client.Select(folder, &imap.SelectOptions{
+		ReadOnly:  true,
+		CondStore: caps.Has(imap.CapCondStore),
+	}).Wait()
+	if err != nil {
+		return mail.RemoteFolderState{}, err
+	}
+	return mail.RemoteFolderState{
+		UIDVALIDITY:   uint64(data.UIDValidity),
+		UIDNEXT:       uint64(data.UIDNext),
+		HighestModSeq: int64(data.HighestModSeq),
+	}, nil
+}
+
+// SearchAllowed issues UID SEARCH HEADER with optional UID range criteria.
+func (s *Source) SearchAllowed(ctx context.Context, acct config.Account, folder string, header string, value string, scope mail.UIDRange) ([]mail.UID, error) {
+	c, err := s.connect(ctx, acct)
+	if err != nil {
+		return nil, err
+	}
+	defer c.close()
+	if _, err := c.client.Select(folder, &imap.SelectOptions{ReadOnly: true}).Wait(); err != nil {
+		return nil, err
+	}
+
+	criteria := &imap.SearchCriteria{
+		Header: []imap.SearchCriteriaHeaderField{{Key: header, Value: value}},
+	}
+	if uidSet, ok := uidRangeSet(scope); ok {
+		criteria.UID = []imap.UIDSet{uidSet}
+	}
+	data, err := c.client.UIDSearch(criteria, nil).Wait()
+	if err != nil {
+		return nil, err
+	}
+	return toMailUIDs(data.AllUIDs()), nil
+}
+
+// ListUIDs returns UIDs in a folder, optionally bounded by a UID range.
+func (s *Source) ListUIDs(ctx context.Context, acct config.Account, folder string, scope mail.UIDRange) ([]mail.UID, error) {
+	c, err := s.connect(ctx, acct)
+	if err != nil {
+		return nil, err
+	}
+	defer c.close()
+	if _, err := c.client.Select(folder, &imap.SelectOptions{ReadOnly: true}).Wait(); err != nil {
+		return nil, err
+	}
+
+	criteria := &imap.SearchCriteria{}
+	if uidSet, ok := uidRangeSet(scope); ok {
+		criteria.UID = []imap.UIDSet{uidSet}
+	}
+	data, err := c.client.UIDSearch(criteria, nil).Wait()
+	if err != nil {
+		return nil, err
+	}
+	return toMailUIDs(data.AllUIDs()), nil
+}
+
+func (s *Source) FetchHeaders(context.Context, config.Account, string, []mail.UID) ([]mail.MessageHeaders, error) {
+	return nil, mail.ErrSourceUnavailable
+}
+
+func (s *Source) FetchEnvelopes(context.Context, config.Account, string, []mail.UID) ([]mail.MessageEnvelope, error) {
+	return nil, mail.ErrSourceUnavailable
+}
+
+func (s *Source) FetchBodyPreview(context.Context, config.Account, string, mail.UID, int) (string, error) {
+	return "", mail.ErrSourceUnavailable
+}
+
+type liveConn struct {
+	client *imapclient.Client
+}
+
+func (c liveConn) close() {
+	_ = c.client.Logout().Wait()
+	_ = c.client.Close()
+}
+
+func (s *Source) connect(ctx context.Context, acct config.Account) (liveConn, error) {
+	password, err := s.password(acct)
+	if err != nil {
+		return liveConn{}, err
+	}
+	address := net.JoinHostPort(acct.Host, strconv.Itoa(acct.Port))
+	timeout := s.timeout
+	if timeout <= 0 {
+		timeout = defaultTimeout
+	}
+	dialer := &net.Dialer{Timeout: timeout}
+	if deadline, ok := ctx.Deadline(); ok {
+		if remaining := time.Until(deadline); remaining > 0 && remaining < timeout {
+			dialer.Timeout = remaining
+		}
+	}
+
+	opts := &imapclient.Options{
+		TLSConfig: &tls.Config{ServerName: acct.Host, MinVersion: tls.VersionTLS12},
+		Dialer:    dialer,
+	}
+	var client *imapclient.Client
+	if acct.TLS != nil && *acct.TLS {
+		client, err = imapclient.DialTLS(address, opts)
+	} else {
+		client, err = imapclient.DialInsecure(address, opts)
+	}
+	if err != nil {
+		return liveConn{}, err
+	}
+	if err := client.Login(acct.Username, password).Wait(); err != nil {
+		_ = client.Close()
+		return liveConn{}, err
+	}
+	return liveConn{client: client}, nil
+}
+
+func (s *Source) password(acct config.Account) (string, error) {
+	store, err := secrets.Load(s.secretsPath)
+	if err != nil {
+		return "", err
+	}
+	password, ok := store.Resolve(acct.PasswordRef.ID)
+	if !ok {
+		return "", mail.ErrSourceUnavailable
+	}
+	return password, nil
+}
+
+func sanitizeCapability(cap string) string {
+	clean := strings.ToUpper(strings.TrimSpace(cap))
+	for _, r := range clean {
+		if (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '=' {
+			continue
+		}
+		return ""
+	}
+	return clean
+}
+
+func sanitizeFolder(folder string) string {
+	clean := strings.TrimSpace(folder)
+	if clean == "" || len(clean) > 256 {
+		return ""
+	}
+	for _, r := range clean {
+		if r < 0x20 || r == 0x7f {
+			return ""
+		}
+	}
+	return clean
+}
+
+func uidRangeSet(scope mail.UIDRange) (imap.UIDSet, bool) {
+	if scope == (mail.UIDRange{}) {
+		return nil, false
+	}
+	var set imap.UIDSet
+	start := imap.UID(scope.Min)
+	stop := imap.UID(scope.Max)
+	if start == 0 && stop == 0 {
+		return nil, false
+	}
+	if start == 0 {
+		start = 1
+	}
+	set.AddRange(start, stop)
+	return set, true
+}
+
+func toMailUIDs(uids []imap.UID) []mail.UID {
+	out := make([]mail.UID, 0, len(uids))
+	for _, uid := range uids {
+		out = append(out, mail.UID(uid))
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out
+}
+
+var _ mail.Source = (*Source)(nil)

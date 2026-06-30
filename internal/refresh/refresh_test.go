@@ -1432,6 +1432,14 @@ type trackingSource struct {
 	delay            time.Duration
 }
 
+func (s *trackingSource) Capabilities(context.Context, config.Account) ([]string, error) {
+	return nil, nil
+}
+
+func (s *trackingSource) Folders(context.Context, config.Account) ([]string, error) {
+	return nil, nil
+}
+
 func (s *trackingSource) SelectFolder(context.Context, config.Account, string) (mail.RemoteFolderState, error) {
 	active := atomic.AddInt32(&s.activeSelects, 1)
 	for {

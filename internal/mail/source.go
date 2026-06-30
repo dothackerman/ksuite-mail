@@ -21,6 +21,8 @@ type RemoteFolderState struct {
 
 // Source is the narrow adapter interface that hides IMAP details.
 type Source interface {
+	Capabilities(ctx context.Context, acct config.Account) ([]string, error)
+	Folders(ctx context.Context, acct config.Account) ([]string, error)
 	SelectFolder(ctx context.Context, acct config.Account, folder string) (RemoteFolderState, error)
 	SearchAllowed(ctx context.Context, acct config.Account, folder string, header string, value string, scope UIDRange) ([]UID, error)
 	ListUIDs(ctx context.Context, acct config.Account, folder string, scope UIDRange) ([]UID, error)

@@ -12,6 +12,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -44,17 +45,10 @@ const (
 )
 
 // source matches the narrow read-only adapter interface.
-type source interface {
-	SelectFolder(ctx context.Context, acct config.Account, folder string) (mail.RemoteFolderState, error)
-	SearchAllowed(ctx context.Context, acct config.Account, folder string, header string, value string, scope mail.UIDRange) ([]mail.UID, error)
-	ListUIDs(ctx context.Context, acct config.Account, folder string, scope mail.UIDRange) ([]mail.UID, error)
-	FetchHeaders(ctx context.Context, acct config.Account, folder string, uids []mail.UID) ([]mail.MessageHeaders, error)
-	FetchEnvelopes(ctx context.Context, acct config.Account, folder string, uids []mail.UID) ([]mail.MessageEnvelope, error)
-	FetchBodyPreview(ctx context.Context, acct config.Account, folder string, uid mail.UID, maxBytes int) (string, error)
-}
+type source = mail.Source
 
 // SourceFactory builds a source from runtime config.
-type SourceFactory func(ctx context.Context, cfg *config.Config) (source, error)
+type SourceFactory func(ctx context.Context, cfg *config.Config) (mail.Source, error)
 
 // UnavailableSourceFactory keeps issue #3 production daemons explicit: read
 // routes exist for the CLI/API contract, but live IMAP is wired by the later
@@ -66,6 +60,14 @@ func UnavailableSourceFactory() SourceFactory {
 }
 
 type unavailableSource struct{}
+
+func (unavailableSource) Capabilities(context.Context, config.Account) ([]string, error) {
+	return nil, mail.ErrSourceUnavailable
+}
+
+func (unavailableSource) Folders(context.Context, config.Account) ([]string, error) {
+	return nil, mail.ErrSourceUnavailable
+}
 
 func (unavailableSource) SelectFolder(context.Context, config.Account, string) (mail.RemoteFolderState, error) {
 	return mail.RemoteFolderState{}, mail.ErrSourceUnavailable
@@ -209,8 +211,13 @@ func (s *Server) handleProbeIMAP(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusFailedDependency, probeCredentialErrorCode(err), "selected account credential is unavailable")
 		return
 	}
+	src, err := s.sourceForConfig(r.Context(), cfg)
+	if err != nil {
+		s.writeError(w, http.StatusInternalServerError, "source_unavailable", "mail source is unavailable")
+		return
+	}
 
-	s.writeOK(w, stubProbeIMAPResponse(*acct))
+	s.writeOK(w, probeIMAPResponse(r.Context(), src, *acct))
 }
 
 func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
@@ -1177,7 +1184,7 @@ func probeCredentialErrorCode(err error) string {
 	}
 }
 
-func stubProbeIMAPResponse(acct config.Account) api.ProbeIMAPResponse {
+func probeIMAPResponse(ctx context.Context, src source, acct config.Account) api.ProbeIMAPResponse {
 	checks := []api.ProbeCheck{
 		{
 			ID:     "account_selection",
@@ -1191,46 +1198,133 @@ func stubProbeIMAPResponse(acct config.Account) api.ProbeIMAPResponse {
 			Code:   "escape_hatch_unavailable",
 			Detail: "probe uses the fixed daemon-side checklist contract",
 		},
-		{
-			ID:     "capability",
-			Status: api.ProbeStatusInconclusive,
-			Code:   "live_probe_not_implemented",
-			Detail: "live provider probing is deferred to the provider implementation slice",
-		},
-		{
-			ID:     "folder_listing",
-			Status: api.ProbeStatusInconclusive,
-			Code:   "live_probe_not_implemented",
-			Detail: "live provider probing is deferred to the provider implementation slice",
-		},
-		{
-			ID:     "uid_behavior",
-			Status: api.ProbeStatusInconclusive,
-			Code:   "live_probe_not_implemented",
-			Detail: "live provider probing is deferred to the provider implementation slice",
-		},
-		{
-			ID:     "read_state",
-			Status: api.ProbeStatusInconclusive,
-			Code:   "live_probe_not_implemented",
-			Detail: "live provider probing is deferred to the provider implementation slice",
-		},
 	}
-	domainStatus := api.ProbeStatusInconclusive
-	domainCode := "live_probe_not_implemented"
-	domainDetail := "live provider probing is deferred to the provider implementation slice"
-	if acct.Policy == config.PolicyFull {
-		domainStatus = api.ProbeStatusNotApplicable
-		domainCode = "full_policy"
-		domainDetail = "full-policy accounts do not depend on domain-header filtering"
+
+	if src == nil {
+		checks = append(checks,
+			probeCheck("capability", api.ProbeStatusFailed, "source_unavailable", "mail source is unavailable"),
+			probeCheck("folder_listing", api.ProbeStatusFailed, "source_unavailable", "mail source is unavailable"),
+			probeCheck("folder_selection", api.ProbeStatusFailed, "source_unavailable", "mail source is unavailable"),
+			probeCheck("uid_behavior", api.ProbeStatusFailed, "source_unavailable", "mail source is unavailable"),
+			domainProbeNotRun(acct),
+			probeCheck("read_state", api.ProbeStatusInconclusive, "fixture_required", "BODY.PEEK read-state fixture is required"),
+		)
+		return api.ProbeIMAPResponse{Account: acct.ID, Status: aggregateProbeStatus(checks), Checks: checks}
 	}
-	checks = append(checks, api.ProbeCheck{
-		ID:     "domain_header_search",
-		Status: domainStatus,
-		Code:   domainCode,
-		Detail: domainDetail,
-	})
+
+	caps, err := src.Capabilities(ctx, acct)
+	if err != nil {
+		checks = append(checks, probeFailure("capability", err))
+	} else {
+		checks = append(checks, probeCheck("capability", api.ProbeStatusPassed, "capability_ok", "capabilities="+strings.Join(caps, ",")))
+	}
+
+	folders, err := src.Folders(ctx, acct)
+	if err != nil {
+		checks = append(checks, probeFailure("folder_listing", err))
+	} else {
+		checks = append(checks, probeCheck("folder_listing", api.ProbeStatusPassed, "list_ok", "folder_count="+strconv.Itoa(len(folders))))
+	}
+
+	folder := firstProbeFolder(acct)
+	if folder == "" {
+		checks = append(checks,
+			probeCheck("folder_selection", api.ProbeStatusInconclusive, "no_configured_folder", "selected account has no configured folders"),
+			probeCheck("uid_behavior", api.ProbeStatusInconclusive, "no_configured_folder", "selected account has no configured folders"),
+			domainProbeNotRun(acct),
+		)
+	} else {
+		state, err := src.SelectFolder(ctx, acct, folder)
+		if err != nil {
+			checks = append(checks, probeFailure("folder_selection", err))
+		} else {
+			detail := fmt.Sprintf("configured_folder=true uidvalidity=%d uidnext=%d highestmodseq=%d", state.UIDVALIDITY, state.UIDNEXT, state.HighestModSeq)
+			checks = append(checks, probeCheck("folder_selection", api.ProbeStatusPassed, "examine_ok", detail))
+		}
+		checks = append(checks, probeUIDBehavior(ctx, src, acct, folder))
+		checks = append(checks, probeDomainHeaders(ctx, src, acct, folder))
+	}
+
+	checks = append(checks, probeCheck("read_state", api.ProbeStatusInconclusive, "fixture_required", "BODY.PEEK read-state fixture is required"))
 	return api.ProbeIMAPResponse{Account: acct.ID, Status: aggregateProbeStatus(checks), Checks: checks}
+}
+
+func probeUIDBehavior(ctx context.Context, src source, acct config.Account, folder string) api.ProbeCheck {
+	uids, err := src.ListUIDs(ctx, acct, folder, mail.UIDRange{})
+	if err != nil {
+		return probeFailure("uid_behavior", err)
+	}
+	if len(uids) == 0 {
+		return probeCheck("uid_behavior", api.ProbeStatusInconclusive, "fixture_required", "no fixture UIDs available")
+	}
+	scope := mail.UIDRange{Min: uint64(uids[0]), Max: uint64(uids[0])}
+	ranged, err := src.ListUIDs(ctx, acct, folder, scope)
+	if err != nil {
+		return probeFailure("uid_behavior", err)
+	}
+	return probeCheck("uid_behavior", api.ProbeStatusPassed, "uid_range_ok", fmt.Sprintf("uid_count=%d range_count=%d", len(uids), len(ranged)))
+}
+
+func probeDomainHeaders(ctx context.Context, src source, acct config.Account, folder string) api.ProbeCheck {
+	if acct.Policy == config.PolicyFull {
+		return probeCheck("domain_header_search", api.ProbeStatusNotApplicable, "full_policy", "full-policy accounts do not depend on domain-header filtering")
+	}
+	if len(acct.Domains) == 0 {
+		return probeCheck("domain_header_search", api.ProbeStatusInconclusive, "no_domain", "domain-policy account has no configured domain")
+	}
+	domain := acct.Domains[0]
+	headers := []string{"From", "To", "Cc", "Bcc"}
+	counts := make([]string, 0, len(headers))
+	total := 0
+	for _, header := range headers {
+		uids, err := src.SearchAllowed(ctx, acct, folder, header, domain, mail.UIDRange{})
+		if err != nil {
+			return probeFailure("domain_header_search", err)
+		}
+		total += len(uids)
+		counts = append(counts, strings.ToLower(header)+"_count="+strconv.Itoa(len(uids)))
+	}
+	if total == 0 {
+		return probeCheck("domain_header_search", api.ProbeStatusInconclusive, "fixture_required", strings.Join(counts, " "))
+	}
+	return probeCheck("domain_header_search", api.ProbeStatusPassed, "header_search_ok", strings.Join(counts, " "))
+}
+
+func domainProbeNotRun(acct config.Account) api.ProbeCheck {
+	if acct.Policy == config.PolicyFull {
+		return probeCheck("domain_header_search", api.ProbeStatusNotApplicable, "full_policy", "full-policy accounts do not depend on domain-header filtering")
+	}
+	return probeCheck("domain_header_search", api.ProbeStatusInconclusive, "prerequisite_failed", "domain-header search was not run")
+}
+
+func firstProbeFolder(acct config.Account) string {
+	for _, folder := range acct.Folders {
+		if strings.TrimSpace(folder) != "" {
+			return folder
+		}
+	}
+	return ""
+}
+
+func probeFailure(id string, err error) api.ProbeCheck {
+	return probeCheck(id, api.ProbeStatusFailed, probeSourceErrorCode(err), "provider probe failed")
+}
+
+func probeCheck(id, status, code, detail string) api.ProbeCheck {
+	return api.ProbeCheck{ID: id, Status: status, Code: code, Detail: detail}
+}
+
+func probeSourceErrorCode(err error) string {
+	switch {
+	case errors.Is(err, mail.ErrSourceUnavailable):
+		return "source_unavailable"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "remote_timeout"
+	case errors.Is(err, os.ErrPermission):
+		return "permission_denied"
+	default:
+		return "remote_failed"
+	}
 }
 
 func aggregateProbeStatus(checks []api.ProbeCheck) string {

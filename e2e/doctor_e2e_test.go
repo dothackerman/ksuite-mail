@@ -3,9 +3,11 @@
 package e2e
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"os/exec"
@@ -18,20 +20,24 @@ import (
 
 const e2eSecret = "TOPSECRET-e2e-do-not-leak"
 
-const e2eConfig = `[mail]
+const e2eConfigTemplate = `[mail]
 default_limit = 50
 
 [[mail.accounts]]
 id = "rs_info"
 email = "info@example.com"
-host = "imap.example.com"
-port = 993
-tls = true
+host = "%s"
+port = %d
+tls = %t
 username = "info@example.com"
 password_ref = { source = "file", provider = "local", id = "/ksuite-mail/rs_info/password" }
 policy = "full"
 folders = ["INBOX"]
 `
+
+func e2eConfig(host string, port int, tls bool) string {
+	return fmt.Sprintf(e2eConfigTemplate, host, port, tls)
+}
 
 func build(t *testing.T, root, pkg, out string) string {
 	t.Helper()
@@ -195,7 +201,7 @@ func TestDoctorEndToEnd(t *testing.T) {
 	secPath := filepath.Join(work, "secrets.json")
 	stateDir := filepath.Join(work, "state")
 	sock := filepath.Join(work, "d.sock")
-	if err := os.WriteFile(cfgPath, []byte(e2eConfig), 0o640); err != nil {
+	if err := os.WriteFile(cfgPath, []byte(e2eConfig("imap.example.com", 993, true)), 0o640); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
 	if err := os.WriteFile(secPath,
@@ -257,7 +263,8 @@ func TestProbeIMAPEndToEnd(t *testing.T) {
 	secPath := filepath.Join(work, "secrets.json")
 	stateDir := filepath.Join(work, "state")
 	sock := filepath.Join(work, "d.sock")
-	if err := os.WriteFile(cfgPath, []byte(e2eConfig), 0o640); err != nil {
+	imapHost, imapPort := startFakeIMAPServer(t)
+	if err := os.WriteFile(cfgPath, []byte(e2eConfig(imapHost, imapPort, false)), 0o640); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
 	if err := os.WriteFile(secPath,
@@ -309,6 +316,89 @@ func TestProbeIMAPEndToEnd(t *testing.T) {
 			t.Fatalf("probe check used legacy status vocabulary: %s", out)
 		}
 	}
+}
+
+func startFakeIMAPServer(t *testing.T) (string, int) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		if errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.EACCES) || strings.Contains(err.Error(), "operation not permitted") {
+			t.Skipf("TCP listener denied by environment: %v", err)
+		}
+		t.Fatalf("listen fake imap: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go serveFakeIMAP(conn)
+		}
+	}()
+	host, portText, err := net.SplitHostPort(ln.Addr().String())
+	if err != nil {
+		t.Fatalf("split fake imap address: %v", err)
+	}
+	var port int
+	if _, err := fmt.Sscanf(portText, "%d", &port); err != nil {
+		t.Fatalf("parse fake imap port: %v", err)
+	}
+	return host, port
+}
+
+func serveFakeIMAP(conn net.Conn) {
+	defer conn.Close()
+	r := bufio.NewReader(conn)
+	w := bufio.NewWriter(conn)
+	writeIMAP(w, "* OK fake IMAP ready")
+	for {
+		line, err := r.ReadString('\n')
+		if err != nil {
+			return
+		}
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		tag := fields[0]
+		cmd := ""
+		if len(fields) > 1 {
+			cmd = strings.ToUpper(fields[1])
+		}
+		switch cmd {
+		case "LOGIN":
+			writeIMAP(w, tag+" OK LOGIN completed")
+		case "CAPABILITY":
+			writeIMAP(w, "* CAPABILITY IMAP4rev1 UIDPLUS CONDSTORE")
+			writeIMAP(w, tag+" OK CAPABILITY completed")
+		case "LIST":
+			writeIMAP(w, `* LIST () "/" "INBOX"`)
+			writeIMAP(w, tag+" OK LIST completed")
+		case "SELECT", "EXAMINE":
+			writeIMAP(w, "* FLAGS (\\Seen)")
+			writeIMAP(w, "* 1 EXISTS")
+			writeIMAP(w, "* OK [UIDVALIDITY 123]")
+			writeIMAP(w, "* OK [UIDNEXT 11]")
+			writeIMAP(w, "* OK [HIGHESTMODSEQ 7]")
+			writeIMAP(w, tag+" OK [READ-ONLY] SELECT completed")
+		case "UID":
+			writeIMAP(w, "* SEARCH 10")
+			writeIMAP(w, tag+" OK SEARCH completed")
+		case "LOGOUT":
+			writeIMAP(w, "* BYE fake IMAP closing")
+			writeIMAP(w, tag+" OK LOGOUT completed")
+			return
+		default:
+			writeIMAP(w, tag+" BAD unsupported")
+		}
+	}
+}
+
+func writeIMAP(w *bufio.Writer, line string) {
+	_, _ = w.WriteString(line + "\r\n")
+	_ = w.Flush()
 }
 
 func TestProbeIMAPRejectsMissingAccountBeforeDaemon(t *testing.T) {

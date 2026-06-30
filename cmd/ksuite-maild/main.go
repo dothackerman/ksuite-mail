@@ -16,8 +16,11 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/dothackerman/ksuite-mail/internal/config"
 	"github.com/dothackerman/ksuite-mail/internal/daemon"
+	"github.com/dothackerman/ksuite-mail/internal/imapadapter"
 	"github.com/dothackerman/ksuite-mail/internal/layout"
+	"github.com/dothackerman/ksuite-mail/internal/mail"
 )
 
 // version is injected at build time via -ldflags "-X main.version=<tag>".
@@ -50,11 +53,13 @@ func main() {
 	defer stop()
 
 	srv := daemon.New(daemon.Options{
-		ConfigPath:    *configPath,
-		SecretsPath:   *secretsPath,
-		StateDir:      *stateDir,
-		Logger:        log,
-		SourceFactory: daemon.UnavailableSourceFactory(),
+		ConfigPath:  *configPath,
+		SecretsPath: *secretsPath,
+		StateDir:    *stateDir,
+		Logger:      log,
+		SourceFactory: func(context.Context, *config.Config) (mail.Source, error) {
+			return imapadapter.New(*secretsPath), nil
+		},
 	})
 	if err := srv.Serve(ctx, ln); err != nil {
 		log.Error("daemon stopped with error", "err", err)
