@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
 	"testing"
 
 	"github.com/dothackerman/ksuite-mail/internal/api"
@@ -148,12 +149,30 @@ func TestRunnerRunIMAPChecklistMatrix(t *testing.T) {
 			},
 		},
 		{
+			name:       "domain policy with no domains is inconclusive",
+			account:    domainAccount("INBOX"),
+			source:     probeAdapter(map[string][]mailfake.Message{"INBOX": {{UID: 10, VisibleByPolicy: true}, {UID: 20, VisibleByPolicy: true, Body: "body"}}}),
+			wantStatus: api.ProbeStatusInconclusive,
+			want: map[string]api.ProbeCheck{
+				"domain_header_search": {Status: api.ProbeStatusInconclusive, Code: "no_domain", Detail: "domain-policy account has no configured domain"},
+			},
+		},
+		{
 			name:       "provider errors never expose raw provider text",
 			account:    fullAccount("INBOX"),
 			source:     probeAdapter(map[string][]mailfake.Message{"INBOX": {{UID: 10, VisibleByPolicy: true}, {UID: 20, VisibleByPolicy: true}}}, sourceFailure{method: "list", account: "rs_info", folder: "INBOX", err: errors.New("UID SEARCH leaked info@example.com pw private text")}),
 			wantStatus: api.ProbeStatusFailed,
 			want: map[string]api.ProbeCheck{
 				"uid_behavior": {Status: api.ProbeStatusFailed, Code: "remote_failed", Detail: "provider probe failed"},
+			},
+		},
+		{
+			name:       "permission errors map to sanitized permission denied code",
+			account:    fullAccount("INBOX"),
+			source:     probeAdapter(map[string][]mailfake.Message{"INBOX": {{UID: 10, VisibleByPolicy: true}, {UID: 20, VisibleByPolicy: true}}}, sourceFailure{method: "list", account: "rs_info", folder: "INBOX", err: os.ErrPermission}),
+			wantStatus: api.ProbeStatusFailed,
+			want: map[string]api.ProbeCheck{
+				"uid_behavior": {Status: api.ProbeStatusFailed, Code: "permission_denied", Detail: "provider probe failed"},
 			},
 		},
 		{
@@ -173,6 +192,25 @@ func TestRunnerRunIMAPChecklistMatrix(t *testing.T) {
 			wantStatus: api.ProbeStatusInconclusive,
 			want: map[string]api.ProbeCheck{
 				"uid_behavior": {Status: api.ProbeStatusInconclusive, Code: "fixture_required"},
+			},
+		},
+		{
+			name:       "read state requires a fixture uid",
+			account:    fullAccount("INBOX"),
+			source:     probeAdapter(map[string][]mailfake.Message{"INBOX": {}}),
+			wantStatus: api.ProbeStatusInconclusive,
+			want: map[string]api.ProbeCheck{
+				"uid_behavior": {Status: api.ProbeStatusInconclusive, Code: "fixture_required"},
+				"read_state":   {Status: api.ProbeStatusInconclusive, Code: "fixture_required", Detail: "BODY.PEEK read-state fixture is required"},
+			},
+		},
+		{
+			name:       "read state preview errors are sanitized",
+			account:    fullAccount("INBOX"),
+			source:     probeAdapter(map[string][]mailfake.Message{"INBOX": {{UID: 10, VisibleByPolicy: true}, {UID: 20, VisibleByPolicy: true}}}, sourceFailure{method: "preview", account: "rs_info", folder: "INBOX", err: errors.New("FETCH leaked subject pw private text")}),
+			wantStatus: api.ProbeStatusFailed,
+			want: map[string]api.ProbeCheck{
+				"read_state": {Status: api.ProbeStatusFailed, Code: "remote_failed", Detail: "provider probe failed"},
 			},
 		},
 	}
