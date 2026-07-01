@@ -160,8 +160,12 @@ func probeDomainHeaders(ctx context.Context, src mail.Source, acct config.Accoun
 	}
 	sentFolder := sentProbeFolder(acct, folder)
 	headers := []string{"From", "To", "Cc", "Bcc"}
+	facts := &api.ProbeFacts{DomainHeaderSearch: make([]api.DomainHeaderSearch, 0, len(headers)*len(acct.Domains))}
 	counts := make([]string, 0, len(headers)*len(acct.Domains))
 	missingFixture := false
+	overbroad := false
+	overbroadHeader := ""
+	overbroadDomain := ""
 	checkedDomain := false
 	for _, domain := range acct.Domains {
 		domain = strings.TrimSpace(domain)
@@ -185,9 +189,19 @@ func probeDomainHeaders(ctx context.Context, src mail.Source, acct config.Accoun
 			if err != nil {
 				return probeFailure(checkDomainHeader, err)
 			}
+			nonmatchingVisible := len(negativeUIDs) > 0
+			facts.DomainHeaderSearch = append(facts.DomainHeaderSearch, api.DomainHeaderSearch{
+				Domain:             domain,
+				Header:             header,
+				MatchedUIDCount:    len(uids),
+				NonmatchingVisible: nonmatchingVisible,
+			})
 			if len(negativeUIDs) > 0 {
-				detail := fmt.Sprintf("header=%s domain_index_checked=true nonmatching_visible=true", strings.ToLower(header))
-				return probeCheck(checkDomainHeader, api.ProbeStatusFailed, "header_search_overbroad", detail)
+				if !overbroad {
+					overbroad = true
+					overbroadHeader = header
+					overbroadDomain = domain
+				}
 			}
 			counts = append(counts, strings.ToLower(header)+"_count="+strconv.Itoa(len(uids)))
 		}
@@ -195,10 +209,14 @@ func probeDomainHeaders(ctx context.Context, src mail.Source, acct config.Accoun
 	if !checkedDomain {
 		return probeCheck(checkDomainHeader, api.ProbeStatusInconclusive, "no_domain", "domain-policy account has no configured domain")
 	}
-	if missingFixture {
-		return probeCheck(checkDomainHeader, api.ProbeStatusInconclusive, "fixture_required", strings.Join(counts, " "))
+	if overbroad {
+		detail := fmt.Sprintf("header=%s domain=%s domain_index_checked=true nonmatching_visible=true", strings.ToLower(overbroadHeader), overbroadDomain)
+		return probeCheckFacts(checkDomainHeader, api.ProbeStatusFailed, "header_search_overbroad", detail, facts)
 	}
-	return probeCheck(checkDomainHeader, api.ProbeStatusPassed, "header_search_ok", strings.Join(counts, " "))
+	if missingFixture {
+		return probeCheckFacts(checkDomainHeader, api.ProbeStatusInconclusive, "fixture_required", strings.Join(counts, " "), facts)
+	}
+	return probeCheckFacts(checkDomainHeader, api.ProbeStatusPassed, "header_search_ok", strings.Join(counts, " "), facts)
 }
 
 func probeReadState(ctx context.Context, src mail.Source, acct config.Account, folder string) api.ProbeCheck {

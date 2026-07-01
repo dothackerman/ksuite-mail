@@ -625,6 +625,15 @@ func TestProbeIMAPEndpointChecksAllDomainsAndSentBccFolder(t *testing.T) {
 	if check.Status != api.ProbeStatusPassed || check.Code != "header_search_ok" {
 		t.Fatalf("domain_header_search check = %+v", check)
 	}
+	if check.Facts == nil || len(check.Facts.DomainHeaderSearch) != 8 {
+		t.Fatalf("domain header search facts missing or incomplete: %+v", check.Facts)
+	}
+	if check.Facts.DomainHeaderSearch[3].Domain != "regenerativ.ch" || check.Facts.DomainHeaderSearch[3].Header != "Bcc" {
+		t.Fatalf("unexpected Bcc fact order/value: %#v", check.Facts.DomainHeaderSearch[3])
+	}
+	if check.Facts.DomainHeaderSearch[7].Domain != "example.org" || check.Facts.DomainHeaderSearch[7].Header != "Bcc" {
+		t.Fatalf("unexpected sent Bcc fact order/value: %#v", check.Facts.DomainHeaderSearch[7])
+	}
 	calls := adapter.CallsSnapshot()
 	var foundSecondDomain, foundSentBcc bool
 	for _, call := range calls {
