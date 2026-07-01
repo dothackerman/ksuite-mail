@@ -237,14 +237,24 @@ type ProbeCheck struct {
 // uses typed scalar fields instead of an open map so arbitrary provider text
 // cannot be threaded into diagnostics by accident.
 type ProbeFacts struct {
-	FolderCount   *int     `json:"folder_count,omitempty"`
-	Folders       []string `json:"folders,omitempty"`
-	Folder        string   `json:"folder,omitempty"`
-	ReadOnly      *bool    `json:"read_only,omitempty"`
-	SelectionMode string   `json:"selection_mode,omitempty"`
-	UIDVALIDITY   *uint64  `json:"uidvalidity,omitempty"`
-	UIDNEXT       *uint64  `json:"uidnext,omitempty"`
-	HighestModSeq *int64   `json:"highestmodseq,omitempty"`
+	FolderCount        *int                 `json:"folder_count,omitempty"`
+	Folders            []string             `json:"folders,omitempty"`
+	Folder             string               `json:"folder,omitempty"`
+	ReadOnly           *bool                `json:"read_only,omitempty"`
+	SelectionMode      string               `json:"selection_mode,omitempty"`
+	UIDVALIDITY        *uint64              `json:"uidvalidity,omitempty"`
+	UIDNEXT            *uint64              `json:"uidnext,omitempty"`
+	HighestModSeq      *int64               `json:"highestmodseq,omitempty"`
+	DomainHeaderSearch []DomainHeaderSearch `json:"domain_header_search,omitempty"`
+}
+
+// DomainHeaderSearch represents a fixture-safe outcome for one domain-header
+// probe slice.
+type DomainHeaderSearch struct {
+	Domain             string `json:"domain"`
+	Header             string `json:"header"`
+	MatchedUIDCount    int    `json:"matched_uid_count"`
+	NonmatchingVisible bool   `json:"nonmatching_visible"`
 }
 
 // ReadStatus determines which top-level status applies to read responses.
