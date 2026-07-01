@@ -443,10 +443,74 @@ func TestRunnerRunIMAPRefreshStrategyDecision(t *testing.T) {
 		if gotCheck.Status != api.ProbeStatusInconclusive || gotCheck.Code != "prerequisite_failed" {
 			t.Fatalf("refresh_strategy check = %+v", gotCheck)
 		}
-		if gotCheck.Facts == nil || gotCheck.Facts.UIDRangeSupported != nil || gotCheck.Facts.RefreshStrategy != "" {
+		if gotCheck.Facts == nil || gotCheck.Facts.UIDRangeSupported != nil || gotCheck.Facts.RefreshStrategy != "inconclusive" {
 			t.Fatalf("expected only prerequisites in refresh strategy facts, got %+v", gotCheck.Facts)
 		}
 	})
+}
+
+func TestRunnerRunIMAPInconclusiveRefreshStrategyAlwaysHasStructuredFact(t *testing.T) {
+	tests := []struct {
+		name    string
+		account config.Account
+		source  mail.Source
+	}{
+		{
+			name:    "nil source",
+			account: fullAccount("INBOX"),
+			source:  nil,
+		},
+		{
+			name:    "capability failure",
+			account: fullAccount("INBOX"),
+			source: probeAdapter(
+				map[string][]mailfake.Message{"INBOX": {{UID: 10, VisibleByPolicy: true}, {UID: 20, VisibleByPolicy: true}}},
+				sourceFailure{method: "capability", account: "rs_info", err: errors.New("NO auth failed with private text")},
+			),
+		},
+		{
+			name:    "folder listing failure",
+			account: fullAccount("INBOX"),
+			source: probeAdapter(
+				map[string][]mailfake.Message{"INBOX": {{UID: 10, VisibleByPolicy: true}, {UID: 20, VisibleByPolicy: true}}},
+				sourceFailure{method: "folders", account: "rs_info", err: errors.New("LIST failed with private text")},
+			),
+		},
+		{
+			name:    "no configured folder",
+			account: fullAccount(" "),
+			source:  probeAdapter(map[string][]mailfake.Message{"INBOX": {{UID: 10, VisibleByPolicy: true}, {UID: 20, VisibleByPolicy: true}}}),
+		},
+		{
+			name:    "folder selection failure",
+			account: fullAccount("INBOX"),
+			source: probeAdapter(
+				map[string][]mailfake.Message{"INBOX": {{UID: 10, VisibleByPolicy: true}, {UID: 20, VisibleByPolicy: true}}},
+				sourceFailure{method: "select", account: "rs_info", folder: "INBOX", err: errors.New("EXAMINE failed with private text")},
+			),
+		},
+		{
+			name:    "missing uid fixture",
+			account: fullAccount("INBOX"),
+			source:  probeAdapter(map[string][]mailfake.Message{"INBOX": {{UID: 10, VisibleByPolicy: true}}}),
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := providerprobe.Runner{}.RunIMAP(context.Background(), tc.source, tc.account)
+			refreshStrategy := checkByID(t, got, "refresh_strategy")
+			if refreshStrategy.Status != api.ProbeStatusInconclusive {
+				t.Fatalf("refresh_strategy status = %q, want %q: %+v", refreshStrategy.Status, api.ProbeStatusInconclusive, refreshStrategy)
+			}
+			if refreshStrategy.Facts == nil {
+				t.Fatalf("refresh_strategy facts missing: %+v", refreshStrategy)
+			}
+			if refreshStrategy.Facts.RefreshStrategy != "inconclusive" {
+				t.Fatalf("refresh_strategy fact = %q, want inconclusive: %+v", refreshStrategy.Facts.RefreshStrategy, refreshStrategy.Facts)
+			}
+		})
+	}
 }
 
 type sourceNoCondstore struct {
