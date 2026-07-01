@@ -31,4 +31,5 @@ type Source interface {
 	FetchHeaders(ctx context.Context, acct config.Account, folder string, uids []UID) ([]MessageHeaders, error)
 	FetchEnvelopes(ctx context.Context, acct config.Account, folder string, uids []UID) ([]MessageEnvelope, error)
 	FetchBodyPreview(ctx context.Context, acct config.Account, folder string, uid UID, maxBytes int) (string, error)
+	FetchBodyPreviewAndSeenState(ctx context.Context, acct config.Account, folder string, uid UID, maxBytes int) (string, bool, error)
 }

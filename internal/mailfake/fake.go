@@ -23,11 +23,13 @@ type Call struct {
 
 // Message provides a fixture envelope and body payload.
 type Message struct {
-	UID             mail.UID
-	Envelope        mail.MessageEnvelope
-	Body            string
-	VisibleByPolicy bool
-	SearchByHeader  map[string][]mail.UID
+	UID                mail.UID
+	Envelope           mail.MessageEnvelope
+	Body               string
+	VisibleByPolicy    bool
+	SearchByHeader     map[string][]mail.UID
+	Seen               bool
+	MarksSeenOnPreview bool
 }
 
 // FolderData stores per-folder adapter state.
@@ -437,27 +439,35 @@ func (a *Adapter) FetchEnvelopes(_ context.Context, acct config.Account, folder 
 }
 
 // FetchBodyPreview returns a capped body preview for one UID.
-func (a *Adapter) FetchBodyPreview(_ context.Context, acct config.Account, folder string, uid mail.UID, maxBytes int) (string, error) {
+func (a *Adapter) FetchBodyPreview(ctx context.Context, acct config.Account, folder string, uid mail.UID, maxBytes int) (string, error) {
+	body, _, err := a.FetchBodyPreviewAndSeenState(ctx, acct, folder, uid, maxBytes)
+	return body, err
+}
+
+// FetchBodyPreviewAndSeenState returns a bounded body preview and whether it flips seen.
+func (a *Adapter) FetchBodyPreviewAndSeenState(_ context.Context, acct config.Account, folder string, uid mail.UID, maxBytes int) (string, bool, error) {
 	a.appendCall(methodPreview, acct.ID, folder, "uid="+fmt.Sprintf("%d", uid))
 	if err := a.checkFailure(methodPreview, acct.ID, folder, ""); err != nil {
-		return "", err
+		return "", false, err
 	}
 	fd, ok := a.folder(acct, folder)
 	if !ok {
-		return "", errors.New("folder not found: " + acct.ID + ":" + folder)
+		return "", false, errors.New("folder not found: " + acct.ID + ":" + folder)
 	}
 	msg, ok := fd.Messages[uid]
 	if !ok {
-		return "", errors.New("message not found")
+		return "", false, errors.New("message not found")
 	}
 	if maxBytes <= 0 {
-		return msg.Body, nil
+		return msg.Body, false, nil
 	}
 	body := msg.Body
 	if len(body) > maxBytes {
 		body = body[:maxBytes]
 	}
-	return body, nil
+	seenBefore := msg.Seen
+	seenAfter := seenBefore || msg.MarksSeenOnPreview
+	return body, !seenBefore && seenAfter, nil
 }
 
 func (a *Adapter) folder(acct config.Account, folder string) (FolderData, bool) {

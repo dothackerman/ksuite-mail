@@ -118,8 +118,10 @@ Outcome:
 
 Expected behavior:
 
-- The probe verifies whether `BODY.PEEK` avoids marking mail as seen.
-- The result is reported as a safe boolean or `inconclusive`.
+- The daemon checks a bounded fixture message using `BODY.PEEK`.
+- The probe reports `read_state_preserved=true` only when previewing does not flip seen state.
+- The probe reports `read_state_preserved=false` on failure and returns code `body_marked_seen`.
+- The probe reports `read_state_preserved` as `inconclusive` when the required fixture is missing.
 - No message content is returned.
 
 Outcome:

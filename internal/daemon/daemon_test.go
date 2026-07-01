@@ -184,6 +184,10 @@ func (timeoutProbeSource) FetchBodyPreview(context.Context, config.Account, stri
 	return "", errors.New("unexpected preview")
 }
 
+func (timeoutProbeSource) FetchBodyPreviewAndSeenState(context.Context, config.Account, string, mail.UID, int) (string, bool, error) {
+	return "", false, errors.New("unexpected preview")
+}
+
 func newLocalHTTPServer(t *testing.T, opts daemon.Options) *httptest.Server {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
