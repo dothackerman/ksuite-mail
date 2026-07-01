@@ -158,7 +158,7 @@ func probeDomainHeaders(ctx context.Context, src mail.Source, acct config.Accoun
 	if len(acct.Domains) == 0 {
 		return probeCheck(checkDomainHeader, api.ProbeStatusInconclusive, "no_domain", "domain-policy account has no configured domain")
 	}
-	sentFolder := sentProbeFolder(acct, folder)
+	sentFolder := sentProbeFolder(acct)
 	headers := []string{"From", "To", "Cc", "Bcc"}
 	facts := &api.ProbeFacts{DomainHeaderSearch: make([]api.DomainHeaderSearch, 0, len(headers)*len(acct.Domains))}
 	counts := make([]string, 0, len(headers)*len(acct.Domains))
@@ -175,7 +175,12 @@ func probeDomainHeaders(ctx context.Context, src mail.Source, acct config.Accoun
 		checkedDomain = true
 		for _, header := range headers {
 			targetFolder := folder
-			if header == "Bcc" && sentFolder != "" {
+			if header == "Bcc" {
+				if sentFolder == "" {
+					missingFixture = true
+					counts = append(counts, strings.ToLower(header)+"_count=0")
+					continue
+				}
 				targetFolder = sentFolder
 			}
 			uids, err := src.SearchAllowed(ctx, acct, targetFolder, header, domain, mail.UIDRange{})
@@ -253,7 +258,7 @@ func firstProbeFolder(acct config.Account) string {
 	return ""
 }
 
-func sentProbeFolder(acct config.Account, fallback string) string {
+func sentProbeFolder(acct config.Account) string {
 	for _, folder := range acct.Folders {
 		clean := strings.TrimSpace(folder)
 		if clean == "" {
@@ -263,7 +268,7 @@ func sentProbeFolder(acct config.Account, fallback string) string {
 			return clean
 		}
 	}
-	return fallback
+	return ""
 }
 
 func probeFailure(id checkID, err error) api.ProbeCheck {

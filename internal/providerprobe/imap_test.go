@@ -177,6 +177,18 @@ func TestRunnerRunIMAPChecklistMatrix(t *testing.T) {
 			},
 		},
 		{
+			name:    "domain search errors never expose raw provider text",
+			account: domainAccount("INBOX", "regenerativ.ch"),
+			source: probeAdapter(
+				map[string][]mailfake.Message{"INBOX": {{UID: 10, VisibleByPolicy: true}, {UID: 20, VisibleByPolicy: true}}},
+				sourceFailure{method: "search", account: "rs_info", folder: "INBOX", arg: "from:regenerativ.ch", err: errors.New("UID SEARCH leaked info@example.com pw private text")},
+			),
+			wantStatus: api.ProbeStatusFailed,
+			want: map[string]api.ProbeCheck{
+				"domain_header_search": {Status: api.ProbeStatusFailed, Code: "remote_failed", Detail: "provider probe failed"},
+			},
+		},
+		{
 			name:       "permission errors map to sanitized permission denied code",
 			account:    fullAccount("INBOX"),
 			source:     probeAdapter(map[string][]mailfake.Message{"INBOX": {{UID: 10, VisibleByPolicy: true}, {UID: 20, VisibleByPolicy: true}}}, sourceFailure{method: "list", account: "rs_info", folder: "INBOX", err: os.ErrPermission}),
@@ -332,14 +344,23 @@ func TestRunnerRunIMAPOmitsHighestModSeqWhenUnavailable(t *testing.T) {
 }
 
 func TestRunnerRunIMAPReportsStructuredDomainHeaderSearchFacts(t *testing.T) {
-	source := domainFixtureSource(map[string][]mail.UID{
-		"From": {10},
-		"To":   {10},
-		"Cc":   {20},
-		"Bcc":  {20},
+	source := probeAdapter(map[string][]mailfake.Message{
+		"INBOX": {{UID: 10, VisibleByPolicy: true}, {UID: 20, VisibleByPolicy: true}},
+		"Sent":  {{UID: 30, VisibleByPolicy: true}},
 	})
+	for _, header := range []string{"From", "To", "Cc"} {
+		source.SetSearchResult("rs_info", "INBOX", header, "regenerativ.ch", []mail.UID{10})
+		source.SetSearchResult("rs_info", "INBOX", header, "ksuite-mail-probe.invalid", nil)
+	}
+	source.SetSearchResult("rs_info", "Sent", "Bcc", "regenerativ.ch", []mail.UID{30})
+	source.SetSearchResult("rs_info", "Sent", "Bcc", "ksuite-mail-probe.invalid", nil)
 
-	got := providerprobe.Runner{}.RunIMAP(context.Background(), source, domainAccount("INBOX", "regenerativ.ch"))
+	got := providerprobe.Runner{}.RunIMAP(context.Background(), source, config.Account{
+		ID:      "rs_info",
+		Policy:  config.PolicyDomain,
+		Domains: []string{"regenerativ.ch"},
+		Folders: []string{"INBOX", "Sent"},
+	})
 
 	check := checkByID(t, got, "domain_header_search")
 	if check.Status != api.ProbeStatusPassed || check.Code != "header_search_ok" {
