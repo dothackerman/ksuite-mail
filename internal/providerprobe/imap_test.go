@@ -185,6 +185,26 @@ func TestRunnerRunIMAPChecklistMatrix(t *testing.T) {
 			},
 		},
 		{
+			name:    "uid behavior failures do not force unsupported strategy",
+			account: fullAccount("INBOX"),
+			source: func() mail.Source {
+				source := sourceNoCondstore{
+					Adapter: probeAdapter(
+						map[string][]mailfake.Message{"INBOX": {{UID: 10, VisibleByPolicy: true}, {UID: 20, VisibleByPolicy: true}}},
+						sourceFailure{method: "list", account: "rs_info", folder: "INBOX", err: errors.New("uid behavior probe failed")},
+					),
+				}
+				source.SetUIDState("rs_info", "INBOX", 777, 21)
+				source.SetHighestModSeq("rs_info", "INBOX", 0)
+				return source
+			}(),
+			wantStatus: api.ProbeStatusFailed,
+			want: map[string]api.ProbeCheck{
+				"uid_behavior":     {Status: api.ProbeStatusFailed, Code: "remote_failed", Detail: "provider probe failed"},
+				"refresh_strategy": {Status: api.ProbeStatusInconclusive, Code: "strategy_inconclusive"},
+			},
+		},
+		{
 			name:       "failed status outranks inconclusive and passed",
 			account:    fullAccount("INBOX"),
 			source:     rangeIgnoringSource{Source: probeAdapter(map[string][]mailfake.Message{"INBOX": {{UID: 10, VisibleByPolicy: true}, {UID: 20, VisibleByPolicy: true}}})},
@@ -294,6 +314,26 @@ func TestRunnerRunIMAPReportsStructuredFolderStateFacts(t *testing.T) {
 	if folderSelection.Facts.HighestModSeq == nil || *folderSelection.Facts.HighestModSeq != 42 {
 		t.Fatalf("highestmodseq fact = %+v, want 42", folderSelection.Facts.HighestModSeq)
 	}
+
+	refreshStrategy := checkByID(t, got, "refresh_strategy")
+	if refreshStrategy.Facts == nil {
+		t.Fatalf("refresh strategy facts missing: %+v", refreshStrategy)
+	}
+	if refreshStrategy.Status != api.ProbeStatusPassed || refreshStrategy.Code != "modseq_strategy" {
+		t.Fatalf("refresh_strategy check = %+v", refreshStrategy)
+	}
+	if refreshStrategy.Facts.RefreshStrategy != "modseq" {
+		t.Fatalf("refresh strategy = %q, want modseq", refreshStrategy.Facts.RefreshStrategy)
+	}
+	if refreshStrategy.Facts.UIDRangeSupported == nil || !*refreshStrategy.Facts.UIDRangeSupported {
+		t.Fatalf("uid_range_supported should reflect known UID-range behavior: %+v", refreshStrategy.Facts)
+	}
+	if refreshStrategy.Facts.CondstoreSupported == nil || !*refreshStrategy.Facts.CondstoreSupported {
+		t.Fatalf("condstore_supported fact = %+v, want true", refreshStrategy.Facts.CondstoreSupported)
+	}
+	if refreshStrategy.Facts.HighestModSeqAvailable == nil || !*refreshStrategy.Facts.HighestModSeqAvailable {
+		t.Fatalf("highestmodseq_available fact = %+v, want true", refreshStrategy.Facts.HighestModSeqAvailable)
+	}
 	assertNoRawProviderLeak(t, got)
 }
 
@@ -328,6 +368,218 @@ func TestRunnerRunIMAPOmitsHighestModSeqWhenUnavailable(t *testing.T) {
 	if folderSelection.Facts.HighestModSeq != nil {
 		t.Fatalf("highestmodseq fact = %+v, want omitted when unavailable", folderSelection.Facts.HighestModSeq)
 	}
+}
+
+func TestRunnerRunIMAPRefreshStrategyDecision(t *testing.T) {
+	t.Run("modseq strategy when condstore and highestmodseq are present", func(t *testing.T) {
+		source := probeAdapter(map[string][]mailfake.Message{
+			"INBOX": {{UID: 10, VisibleByPolicy: true}, {UID: 20, VisibleByPolicy: true}},
+		})
+		source.SetUIDState("rs_info", "INBOX", 555, 21)
+		source.SetHighestModSeq("rs_info", "INBOX", 99)
+
+		got := providerprobe.Runner{}.RunIMAP(context.Background(), source, fullAccount("INBOX"))
+		gotCheck := checkByID(t, got, "refresh_strategy")
+		if gotCheck.Status != api.ProbeStatusPassed || gotCheck.Code != "modseq_strategy" {
+			t.Fatalf("refresh_strategy check = %+v", gotCheck)
+		}
+		if gotCheck.Facts == nil || gotCheck.Facts.RefreshStrategy != "modseq" {
+			t.Fatalf("refresh strategy facts = %+v", gotCheck.Facts)
+		}
+		if gotCheck.Facts.UIDRangeSupported == nil || !*gotCheck.Facts.UIDRangeSupported {
+			t.Fatalf("uid range supported should be true when uid_behavior passes: %+v", gotCheck.Facts)
+		}
+	})
+
+	t.Run("uid-range strategy without condstore", func(t *testing.T) {
+		source := sourceNoCondstore{
+			Adapter: capabilityProbeAdapter(map[string][]mailfake.Message{
+				"INBOX": {{UID: 10, VisibleByPolicy: true}, {UID: 20, VisibleByPolicy: true}},
+			}),
+		}
+		source.SetUIDState("rs_info", "INBOX", 555, 21)
+
+		got := providerprobe.Runner{}.RunIMAP(context.Background(), source, fullAccount("INBOX"))
+		gotCheck := checkByID(t, got, "refresh_strategy")
+		if gotCheck.Status != api.ProbeStatusPassed || gotCheck.Code != "uid_range_strategy" {
+			t.Fatalf("refresh_strategy check = %+v", gotCheck)
+		}
+		if gotCheck.Facts == nil || gotCheck.Facts.RefreshStrategy != "uid_range" {
+			t.Fatalf("refresh strategy facts = %+v", gotCheck.Facts)
+		}
+		if gotCheck.Facts.UIDRangeSupported == nil || !*gotCheck.Facts.UIDRangeSupported {
+			t.Fatalf("uid range supported should be true for uid-range strategy: %+v", gotCheck.Facts)
+		}
+		if gotCheck.Facts.CondstoreSupported == nil || *gotCheck.Facts.CondstoreSupported {
+			t.Fatalf("condstore_supported should be false: %+v", gotCheck.Facts)
+		}
+	})
+
+	t.Run("qresync capability supports modseq strategy", func(t *testing.T) {
+		source := sourceCapabilities{
+			Adapter: capabilityProbeAdapter(map[string][]mailfake.Message{
+				"INBOX": {{UID: 10, VisibleByPolicy: true}, {UID: 20, VisibleByPolicy: true}},
+			}),
+			caps: []string{"IMAP4rev1", "QRESYNC"},
+		}
+		source.SetUIDState("rs_info", "INBOX", 555, 21)
+		source.SetHighestModSeq("rs_info", "INBOX", 99)
+
+		got := providerprobe.Runner{}.RunIMAP(context.Background(), source, fullAccount("INBOX"))
+		gotCheck := checkByID(t, got, "refresh_strategy")
+		if gotCheck.Status != api.ProbeStatusPassed || gotCheck.Code != "modseq_strategy" {
+			t.Fatalf("refresh_strategy check = %+v", gotCheck)
+		}
+		if gotCheck.Facts == nil || gotCheck.Facts.RefreshStrategy != "modseq" {
+			t.Fatalf("refresh strategy facts = %+v", gotCheck.Facts)
+		}
+		if gotCheck.Facts.CondstoreSupported == nil || !*gotCheck.Facts.CondstoreSupported {
+			t.Fatalf("qresync should imply condstore_supported: %+v", gotCheck.Facts)
+		}
+	})
+
+	t.Run("unsupported strategy when uid range is missing and modseq unavailable", func(t *testing.T) {
+		source := sourceNoCondstore{
+			Adapter: capabilityProbeAdapter(map[string][]mailfake.Message{
+				"INBOX": {{UID: 10, VisibleByPolicy: true}, {UID: 20, VisibleByPolicy: true}},
+			}),
+		}
+		source.SetUIDState("rs_info", "INBOX", 555, 21)
+		source.SetHighestModSeq("rs_info", "INBOX", 0)
+
+		got := providerprobe.Runner{}.RunIMAP(context.Background(), rangeIgnoringSource{Source: source}, fullAccount("INBOX"))
+		gotCheck := checkByID(t, got, "refresh_strategy")
+		if gotCheck.Status != api.ProbeStatusFailed || gotCheck.Code != "strategy_unsupported" {
+			t.Fatalf("refresh_strategy check = %+v", gotCheck)
+		}
+		if gotCheck.Facts == nil || gotCheck.Facts.RefreshStrategy != "unsupported" {
+			t.Fatalf("refresh strategy facts = %+v", gotCheck.Facts)
+		}
+		if gotCheck.Facts.UIDRangeSupported == nil || *gotCheck.Facts.UIDRangeSupported {
+			t.Fatalf("uid range supported should be false on mismatch: %+v", gotCheck.Facts)
+		}
+	})
+
+	t.Run("inconclusive strategy when uid state is incomplete", func(t *testing.T) {
+		got := providerprobe.Runner{}.RunIMAP(context.Background(), uidStateSource(0, 21), fullAccount("INBOX"))
+		gotCheck := checkByID(t, got, "refresh_strategy")
+		if gotCheck.Status != api.ProbeStatusInconclusive || gotCheck.Code != "prerequisite_failed" {
+			t.Fatalf("refresh_strategy check = %+v", gotCheck)
+		}
+		if gotCheck.Facts == nil || gotCheck.Facts.UIDRangeSupported != nil || gotCheck.Facts.RefreshStrategy != "inconclusive" {
+			t.Fatalf("expected only prerequisites in refresh strategy facts, got %+v", gotCheck.Facts)
+		}
+	})
+}
+
+func TestRunnerRunIMAPInconclusiveRefreshStrategyAlwaysHasStructuredFact(t *testing.T) {
+	condstoreSupported := true
+	tests := []struct {
+		name          string
+		account       config.Account
+		source        mail.Source
+		wantCondstore *bool
+	}{
+		{
+			name:    "nil source",
+			account: fullAccount("INBOX"),
+			source:  nil,
+		},
+		{
+			name:    "capability failure",
+			account: fullAccount("INBOX"),
+			source: probeAdapter(
+				map[string][]mailfake.Message{"INBOX": {{UID: 10, VisibleByPolicy: true}, {UID: 20, VisibleByPolicy: true}}},
+				sourceFailure{method: "capability", account: "rs_info", err: errors.New("NO auth failed with private text")},
+			),
+		},
+		{
+			name:    "folder listing failure",
+			account: fullAccount("INBOX"),
+			source: probeAdapter(
+				map[string][]mailfake.Message{"INBOX": {{UID: 10, VisibleByPolicy: true}, {UID: 20, VisibleByPolicy: true}}},
+				sourceFailure{method: "folders", account: "rs_info", err: errors.New("LIST failed with private text")},
+			),
+			wantCondstore: &condstoreSupported,
+		},
+		{
+			name:          "empty folder list",
+			account:       fullAccount("INBOX"),
+			source:        probeAdapter(map[string][]mailfake.Message{}),
+			wantCondstore: &condstoreSupported,
+		},
+		{
+			name:          "no configured folder",
+			account:       fullAccount(" "),
+			source:        probeAdapter(map[string][]mailfake.Message{"INBOX": {{UID: 10, VisibleByPolicy: true}, {UID: 20, VisibleByPolicy: true}}}),
+			wantCondstore: &condstoreSupported,
+		},
+		{
+			name:    "folder selection failure",
+			account: fullAccount("INBOX"),
+			source: probeAdapter(
+				map[string][]mailfake.Message{"INBOX": {{UID: 10, VisibleByPolicy: true}, {UID: 20, VisibleByPolicy: true}}},
+				sourceFailure{method: "select", account: "rs_info", folder: "INBOX", err: errors.New("EXAMINE failed with private text")},
+			),
+			wantCondstore: &condstoreSupported,
+		},
+		{
+			name:          "missing uid fixture",
+			account:       fullAccount("INBOX"),
+			source:        probeAdapter(map[string][]mailfake.Message{"INBOX": {{UID: 10, VisibleByPolicy: true}}}),
+			wantCondstore: &condstoreSupported,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := providerprobe.Runner{}.RunIMAP(context.Background(), tc.source, tc.account)
+			refreshStrategy := checkByID(t, got, "refresh_strategy")
+			if refreshStrategy.Status != api.ProbeStatusInconclusive {
+				t.Fatalf("refresh_strategy status = %q, want %q: %+v", refreshStrategy.Status, api.ProbeStatusInconclusive, refreshStrategy)
+			}
+			if refreshStrategy.Facts == nil {
+				t.Fatalf("refresh_strategy facts missing: %+v", refreshStrategy)
+			}
+			if refreshStrategy.Facts.RefreshStrategy != "inconclusive" {
+				t.Fatalf("refresh_strategy fact = %q, want inconclusive: %+v", refreshStrategy.Facts.RefreshStrategy, refreshStrategy.Facts)
+			}
+			if tc.wantCondstore == nil {
+				if refreshStrategy.Facts.CondstoreSupported != nil {
+					t.Fatalf("condstore_supported fact = %+v, want omitted", refreshStrategy.Facts.CondstoreSupported)
+				}
+				return
+			}
+			if refreshStrategy.Facts.CondstoreSupported == nil || *refreshStrategy.Facts.CondstoreSupported != *tc.wantCondstore {
+				t.Fatalf("condstore_supported fact = %+v, want %t", refreshStrategy.Facts.CondstoreSupported, *tc.wantCondstore)
+			}
+		})
+	}
+}
+
+type sourceNoCondstore struct {
+	*mailfake.Adapter
+}
+
+func capabilityProbeAdapter(folders map[string][]mailfake.Message) *mailfake.Adapter {
+	return probeAdapter(folders)
+}
+
+func (s sourceNoCondstore) Capabilities(ctx context.Context, acct config.Account) ([]string, error) {
+	return []string{"IMAP4REV1"}, nil
+}
+
+func (s sourceNoCondstore) SetHighestModSeq(account, folder string, hms int64) {
+	s.Adapter.SetHighestModSeq(account, folder, hms)
+}
+
+type sourceCapabilities struct {
+	*mailfake.Adapter
+	caps []string
+}
+
+func (s sourceCapabilities) Capabilities(ctx context.Context, acct config.Account) ([]string, error) {
+	return append([]string(nil), s.caps...), nil
 }
 
 func fullAccount(folders ...string) config.Account {
@@ -398,6 +650,7 @@ func assertCheckOrder(t *testing.T, probe api.ProbeIMAPResponse, want []string) 
 			"folder_listing",
 			"folder_selection",
 			"uid_behavior",
+			"refresh_strategy",
 			"domain_header_search",
 			"read_state",
 		}
