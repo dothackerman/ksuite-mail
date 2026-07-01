@@ -399,6 +399,38 @@ func TestRunnerRunIMAPReportsStructuredDomainHeaderSearchFacts(t *testing.T) {
 	}
 }
 
+func TestRunnerRunIMAPReportsMissingSentBccFixtureFact(t *testing.T) {
+	source := probeAdapter(map[string][]mailfake.Message{
+		"INBOX": {{UID: 10, VisibleByPolicy: true}, {UID: 20, VisibleByPolicy: true}},
+	})
+	for _, header := range []string{"From", "To", "Cc"} {
+		source.SetSearchResult("rs_info", "INBOX", header, "regenerativ.ch", []mail.UID{10})
+		source.SetSearchResult("rs_info", "INBOX", header, "ksuite-mail-probe.invalid", nil)
+	}
+
+	got := providerprobe.Runner{}.RunIMAP(context.Background(), source, config.Account{
+		ID:      "rs_info",
+		Policy:  config.PolicyDomain,
+		Domains: []string{"regenerativ.ch"},
+		Folders: []string{"INBOX"},
+	})
+
+	check := checkByID(t, got, "domain_header_search")
+	if check.Status != api.ProbeStatusInconclusive || check.Code != "fixture_required" {
+		t.Fatalf("domain header search check = %+v", check)
+	}
+	if check.Facts == nil || len(check.Facts.DomainHeaderSearch) != 4 {
+		t.Fatalf("domain header search facts missing or incomplete: %+v", check.Facts)
+	}
+	bcc := check.Facts.DomainHeaderSearch[3]
+	if bcc.Domain != "regenerativ.ch" || bcc.Header != "Bcc" {
+		t.Fatalf("unexpected Bcc fact order/value: %+v", bcc)
+	}
+	if bcc.MatchedUIDCount != 0 || bcc.NonmatchingVisible {
+		t.Fatalf("unexpected missing Bcc fixture fact: %+v", bcc)
+	}
+}
+
 func TestRunnerRunIMAPReportsDomainHeaderSearchOverbroadFacts(t *testing.T) {
 	source := probeAdapter(map[string][]mailfake.Message{
 		"INBOX": {
@@ -428,7 +460,7 @@ func TestRunnerRunIMAPReportsDomainHeaderSearchOverbroadFacts(t *testing.T) {
 	if check.Status != api.ProbeStatusFailed || check.Code != "header_search_overbroad" {
 		t.Fatalf("domain header search check = %+v", check)
 	}
-	if check.Facts == nil || len(check.Facts.DomainHeaderSearch) != 4 {
+	if check.Facts == nil || len(check.Facts.DomainHeaderSearch) != 1 {
 		t.Fatalf("domain header search overbroad facts = %+v", check.Facts)
 	}
 	for _, fact := range check.Facts.DomainHeaderSearch {
@@ -444,6 +476,45 @@ func TestRunnerRunIMAPReportsDomainHeaderSearchOverbroadFacts(t *testing.T) {
 		if !fact.NonmatchingVisible {
 			t.Fatalf("nonmatching_visible must be true for overbroad fixture: %+v", fact)
 		}
+	}
+}
+
+func TestRunnerRunIMAPPreservesOverbroadDomainHeaderSearchAfterLaterFailure(t *testing.T) {
+	source := probeAdapter(
+		map[string][]mailfake.Message{
+			"INBOX": {
+				{UID: 10, VisibleByPolicy: true},
+				{UID: 20, VisibleByPolicy: true},
+			},
+			"Sent": {
+				{UID: 30, VisibleByPolicy: true},
+			},
+		},
+		sourceFailure{method: "search", account: "rs_info", folder: "INBOX", arg: "to:regenerativ.ch", err: errors.New("transient provider failure")},
+	)
+	source.SetSearchResult("rs_info", "INBOX", "From", "regenerativ.ch", []mail.UID{10})
+	source.SetSearchResult("rs_info", "INBOX", "From", "ksuite-mail-probe.invalid", []mail.UID{20})
+
+	got := providerprobe.Runner{}.RunIMAP(context.Background(), source, config.Account{
+		ID:      "rs_info",
+		Policy:  config.PolicyDomain,
+		Domains: []string{"regenerativ.ch"},
+		Folders: []string{"INBOX", "Sent"},
+	})
+
+	check := checkByID(t, got, "domain_header_search")
+	if check.Status != api.ProbeStatusFailed || check.Code != "header_search_overbroad" {
+		t.Fatalf("domain header search check = %+v", check)
+	}
+	if check.Detail != "header=from domain=regenerativ.ch domain_index_checked=true nonmatching_visible=true" {
+		t.Fatalf("domain header search detail = %q", check.Detail)
+	}
+	if check.Facts == nil || len(check.Facts.DomainHeaderSearch) != 1 {
+		t.Fatalf("domain header search overbroad facts = %+v", check.Facts)
+	}
+	fact := check.Facts.DomainHeaderSearch[0]
+	if fact.Header != "From" || !fact.NonmatchingVisible {
+		t.Fatalf("unexpected overbroad fact = %+v", fact)
 	}
 }
 

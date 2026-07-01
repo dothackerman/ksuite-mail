@@ -163,9 +163,6 @@ func probeDomainHeaders(ctx context.Context, src mail.Source, acct config.Accoun
 	facts := &api.ProbeFacts{DomainHeaderSearch: make([]api.DomainHeaderSearch, 0, len(headers)*len(acct.Domains))}
 	counts := make([]string, 0, len(headers)*len(acct.Domains))
 	missingFixture := false
-	overbroad := false
-	overbroadHeader := ""
-	overbroadDomain := ""
 	checkedDomain := false
 	for _, domain := range acct.Domains {
 		domain = strings.TrimSpace(domain)
@@ -179,6 +176,12 @@ func probeDomainHeaders(ctx context.Context, src mail.Source, acct config.Accoun
 				if sentFolder == "" {
 					missingFixture = true
 					counts = append(counts, strings.ToLower(header)+"_count=0")
+					facts.DomainHeaderSearch = append(facts.DomainHeaderSearch, api.DomainHeaderSearch{
+						Domain:             domain,
+						Header:             header,
+						MatchedUIDCount:    0,
+						NonmatchingVisible: false,
+					})
 					continue
 				}
 				targetFolder = sentFolder
@@ -202,21 +205,14 @@ func probeDomainHeaders(ctx context.Context, src mail.Source, acct config.Accoun
 				NonmatchingVisible: nonmatchingVisible,
 			})
 			if len(negativeUIDs) > 0 {
-				if !overbroad {
-					overbroad = true
-					overbroadHeader = header
-					overbroadDomain = domain
-				}
+				detail := fmt.Sprintf("header=%s domain=%s domain_index_checked=true nonmatching_visible=true", strings.ToLower(header), domain)
+				return probeCheckFacts(checkDomainHeader, api.ProbeStatusFailed, "header_search_overbroad", detail, facts)
 			}
 			counts = append(counts, strings.ToLower(header)+"_count="+strconv.Itoa(len(uids)))
 		}
 	}
 	if !checkedDomain {
 		return probeCheck(checkDomainHeader, api.ProbeStatusInconclusive, "no_domain", "domain-policy account has no configured domain")
-	}
-	if overbroad {
-		detail := fmt.Sprintf("header=%s domain=%s domain_index_checked=true nonmatching_visible=true", strings.ToLower(overbroadHeader), overbroadDomain)
-		return probeCheckFacts(checkDomainHeader, api.ProbeStatusFailed, "header_search_overbroad", detail, facts)
 	}
 	if missingFixture {
 		return probeCheckFacts(checkDomainHeader, api.ProbeStatusInconclusive, "fixture_required", strings.Join(counts, " "), facts)
