@@ -226,10 +226,25 @@ type ProbeIMAPResponse struct {
 // ProbeCheck is one fixed provider-probe checklist outcome. Status values are
 // stable strings such as passed, failed, inconclusive, and not_applicable.
 type ProbeCheck struct {
-	ID     string `json:"id"`
-	Status string `json:"status"`
-	Code   string `json:"code,omitempty"`
-	Detail string `json:"detail,omitempty"`
+	ID     string      `json:"id"`
+	Status string      `json:"status"`
+	Code   string      `json:"code,omitempty"`
+	Detail string      `json:"detail,omitempty"`
+	Facts  *ProbeFacts `json:"facts,omitempty"`
+}
+
+// ProbeFacts carries safe, structured provider-probe facts. It deliberately
+// uses typed scalar fields instead of an open map so arbitrary provider text
+// cannot be threaded into diagnostics by accident.
+type ProbeFacts struct {
+	FolderCount   *int     `json:"folder_count,omitempty"`
+	Folders       []string `json:"folders,omitempty"`
+	Folder        string   `json:"folder,omitempty"`
+	ReadOnly      *bool    `json:"read_only,omitempty"`
+	SelectionMode string   `json:"selection_mode,omitempty"`
+	UIDVALIDITY   *uint64  `json:"uidvalidity,omitempty"`
+	UIDNEXT       *uint64  `json:"uidnext,omitempty"`
+	HighestModSeq *int64   `json:"highestmodseq,omitempty"`
 }
 
 // ReadStatus determines which top-level status applies to read responses.

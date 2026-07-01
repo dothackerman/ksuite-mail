@@ -328,6 +328,8 @@ func (a *Adapter) SelectFolder(_ context.Context, acct config.Account, folder st
 		UIDVALIDITY:   fd.UIDVALIDITY,
 		UIDNEXT:       fd.UIDNEXT,
 		HighestModSeq: fd.HMS,
+		ReadOnly:      true,
+		SelectionMode: "examine",
 	}, nil
 }
 

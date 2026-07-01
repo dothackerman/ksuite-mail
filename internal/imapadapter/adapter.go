@@ -103,6 +103,8 @@ func (s *Source) SelectFolder(ctx context.Context, acct config.Account, folder s
 		UIDVALIDITY:   uint64(data.UIDValidity),
 		UIDNEXT:       uint64(data.UIDNext),
 		HighestModSeq: int64(data.HighestModSeq),
+		ReadOnly:      true,
+		SelectionMode: "examine",
 	}, nil
 }
 

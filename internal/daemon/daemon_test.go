@@ -254,10 +254,11 @@ func TestDoctorEndpointReturnsReport(t *testing.T) {
 func TestProbeIMAPEndpointValidatesAccountAndRunsLiveChecklist(t *testing.T) {
 	adapter := mailfake.NewAdapter(map[string]map[string][]mailfake.Message{
 		"rs_info": {
-			"INBOX":                  {{UID: 10, VisibleByPolicy: true}, {UID: 20, VisibleByPolicy: true}},
-			"private-folder-name-pw": {},
+			"INBOX": {{UID: 10, VisibleByPolicy: true}, {UID: 20, VisibleByPolicy: true}},
+			"Sent":  {},
 		},
 	})
+	adapter.SetUIDState("rs_info", "INBOX", 777, 21)
 	ts := newLocalHTTPServer(t, probeDeployment(t, adapter))
 	defer ts.Close()
 
@@ -305,6 +306,29 @@ func TestProbeIMAPEndpointValidatesAccountAndRunsLiveChecklist(t *testing.T) {
 	if checks["folder_selection"] != api.ProbeStatusPassed {
 		t.Fatalf("folder_selection status = %q, want %q", checks["folder_selection"], api.ProbeStatusPassed)
 	}
+	folderListing := probeCheckByID(t, probe, "folder_listing")
+	if folderListing.Facts == nil || folderListing.Facts.FolderCount == nil || *folderListing.Facts.FolderCount != 2 {
+		t.Fatalf("folder_listing facts = %+v, want folder_count=2", folderListing.Facts)
+	}
+	if got, want := strings.Join(folderListing.Facts.Folders, ","), "INBOX,Sent"; got != want {
+		t.Fatalf("folder facts = %q, want %q", got, want)
+	}
+	folderSelection := probeCheckByID(t, probe, "folder_selection")
+	if folderSelection.Facts == nil {
+		t.Fatalf("folder_selection facts missing")
+	}
+	if folderSelection.Facts.ReadOnly == nil || !*folderSelection.Facts.ReadOnly {
+		t.Fatalf("read_only fact = %+v, want true", folderSelection.Facts.ReadOnly)
+	}
+	if folderSelection.Facts.SelectionMode != "examine" {
+		t.Fatalf("selection_mode = %q, want examine", folderSelection.Facts.SelectionMode)
+	}
+	if folderSelection.Facts.UIDVALIDITY == nil || *folderSelection.Facts.UIDVALIDITY != 777 {
+		t.Fatalf("uidvalidity fact = %+v, want 777", folderSelection.Facts.UIDVALIDITY)
+	}
+	if folderSelection.Facts.UIDNEXT == nil || *folderSelection.Facts.UIDNEXT != 21 {
+		t.Fatalf("uidnext fact = %+v, want 21", folderSelection.Facts.UIDNEXT)
+	}
 	if checks["uid_behavior"] != api.ProbeStatusPassed {
 		t.Fatalf("uid_behavior status = %q, want %q", checks["uid_behavior"], api.ProbeStatusPassed)
 	}
@@ -312,7 +336,6 @@ func TestProbeIMAPEndpointValidatesAccountAndRunsLiveChecklist(t *testing.T) {
 		t.Fatalf("domain_header_search status = %q, want %q", checks["domain_header_search"], api.ProbeStatusNotApplicable)
 	}
 	if strings.Contains(mustJSON(t, env), "pw") ||
-		strings.Contains(mustJSON(t, env), "private-folder-name") ||
 		strings.Contains(mustJSON(t, env), "CAPABILITY ") {
 		t.Fatalf("probe response leaked secret or raw command text: %+v", env)
 	}
