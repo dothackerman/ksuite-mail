@@ -312,6 +312,24 @@ func TestRunnerRunIMAPOmitsUIDFactsWhenStateIsUnavailable(t *testing.T) {
 	}
 }
 
+func TestRunnerRunIMAPOmitsHighestModSeqWhenUnavailable(t *testing.T) {
+	got := providerprobe.Runner{}.RunIMAP(context.Background(), uidStateSource(777, 21), fullAccount("INBOX"))
+
+	folderSelection := checkByID(t, got, "folder_selection")
+	if folderSelection.Facts == nil {
+		t.Fatalf("folder selection facts missing: %+v", folderSelection)
+	}
+	if folderSelection.Facts.UIDVALIDITY == nil || *folderSelection.Facts.UIDVALIDITY != 777 {
+		t.Fatalf("uidvalidity fact = %+v, want 777", folderSelection.Facts.UIDVALIDITY)
+	}
+	if folderSelection.Facts.UIDNEXT == nil || *folderSelection.Facts.UIDNEXT != 21 {
+		t.Fatalf("uidnext fact = %+v, want 21", folderSelection.Facts.UIDNEXT)
+	}
+	if folderSelection.Facts.HighestModSeq != nil {
+		t.Fatalf("highestmodseq fact = %+v, want omitted when unavailable", folderSelection.Facts.HighestModSeq)
+	}
+}
+
 func fullAccount(folders ...string) config.Account {
 	return config.Account{ID: "rs_info", Policy: config.PolicyFull, Folders: folders}
 }

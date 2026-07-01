@@ -271,7 +271,9 @@ func folderStateFacts(folder string, state mail.RemoteFolderState, includeUIDSta
 	if includeUIDState {
 		facts.UIDVALIDITY = uint64Ptr(state.UIDVALIDITY)
 		facts.UIDNEXT = uint64Ptr(state.UIDNEXT)
-		facts.HighestModSeq = int64Ptr(state.HighestModSeq)
+		if state.HighestModSeq > 0 {
+			facts.HighestModSeq = int64Ptr(state.HighestModSeq)
+		}
 	}
 	return facts
 }
