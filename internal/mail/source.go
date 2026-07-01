@@ -17,6 +17,8 @@ type RemoteFolderState struct {
 	UIDVALIDITY   uint64
 	UIDNEXT       uint64
 	HighestModSeq int64
+	ReadOnly      bool
+	SelectionMode string
 }
 
 // Source is the narrow adapter interface that hides IMAP details.

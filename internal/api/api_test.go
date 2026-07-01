@@ -61,6 +61,49 @@ func TestEmptyOptionalFieldsAreOmitted(t *testing.T) {
 	}
 }
 
+func TestProbeFactsUseTypedSafeJSONFields(t *testing.T) {
+	count := 2
+	readOnly := true
+	uidvalidity := uint64(777)
+	uidnext := uint64(21)
+	hms := int64(42)
+	check := api.ProbeCheck{
+		ID:     "folder_selection",
+		Status: api.ProbeStatusPassed,
+		Code:   "examine_ok",
+		Facts: &api.ProbeFacts{
+			FolderCount:   &count,
+			Folders:       []string{"INBOX", "Sent"},
+			Folder:        "INBOX",
+			ReadOnly:      &readOnly,
+			SelectionMode: "examine",
+			UIDVALIDITY:   &uidvalidity,
+			UIDNEXT:       &uidnext,
+			HighestModSeq: &hms,
+		},
+	}
+
+	raw, err := json.Marshal(check)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	got := string(raw)
+	for _, want := range []string{
+		`"facts"`,
+		`"folder_count":2`,
+		`"folders":["INBOX","Sent"]`,
+		`"read_only":true`,
+		`"selection_mode":"examine"`,
+		`"uidvalidity":777`,
+		`"uidnext":21`,
+		`"highestmodseq":42`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("probe facts JSON missing %s in %s", want, got)
+		}
+	}
+}
+
 func TestReadStatusMapsRemoteFallbackToStale(t *testing.T) {
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	meta := api.RefreshMeta{

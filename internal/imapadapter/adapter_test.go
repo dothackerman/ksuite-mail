@@ -146,6 +146,55 @@ func TestSearchAllowedUsesHeaderSearchForAddressHeaders(t *testing.T) {
 	}
 }
 
+func TestSelectFolderUsesReadOnlySelectionAndReturnsUIDState(t *testing.T) {
+	ln, roots, commands := newSelectFolderTLSServer(t)
+	defer func() { _ = ln.Close() }()
+
+	host, portText, err := net.SplitHostPort(ln.Addr().String())
+	if err != nil {
+		t.Fatalf("split listener address: %v", err)
+	}
+	var port int
+	if _, err := fmt.Sscanf(portText, "%d", &port); err != nil {
+		t.Fatalf("parse port %q: %v", portText, err)
+	}
+	acct := testAccount(t)
+	acct.Host = host
+	acct.Port = port
+
+	src := &Source{
+		secretsPath: writeTestSecrets(t),
+		timeout:     time.Second,
+		tlsConfig:   &tls.Config{RootCAs: roots},
+	}
+
+	state, err := src.SelectFolder(context.Background(), acct, "INBOX")
+	if err != nil {
+		t.Fatalf("SelectFolder: %v", err)
+	}
+	if state.UIDVALIDITY != 777 || state.UIDNEXT != 21 || state.HighestModSeq != 42 {
+		t.Fatalf("state = %+v, want UIDVALIDITY=777 UIDNEXT=21 HMS=42", state)
+	}
+	if !state.ReadOnly {
+		t.Fatalf("read-only = false, want true")
+	}
+	if state.SelectionMode != "examine" {
+		t.Fatalf("selection mode = %q, want examine", state.SelectionMode)
+	}
+
+	var gotCommands []string
+	for cmd := range commands {
+		gotCommands = append(gotCommands, cmd)
+	}
+	wire := strings.Join(gotCommands, "\n")
+	if !strings.Contains(wire, "EXAMINE INBOX") {
+		t.Fatalf("wire commands missing EXAMINE:\n%s", wire)
+	}
+	if strings.Contains(wire, "SELECT INBOX") {
+		t.Fatalf("wire commands used writable SELECT:\n%s", wire)
+	}
+}
+
 func testAccount(t *testing.T) config.Account {
 	t.Helper()
 	tlsEnabled := true
@@ -173,6 +222,65 @@ func writeTestSecrets(t *testing.T) string {
 		t.Fatalf("write secrets: %v", err)
 	}
 	return path
+}
+
+func newSelectFolderTLSServer(t *testing.T) (net.Listener, *x509.CertPool, <-chan string) {
+	t.Helper()
+	cert, roots := testCertificate(t)
+	base, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		if errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.EACCES) || strings.Contains(err.Error(), "operation not permitted") {
+			t.Skipf("TCP listener denied by environment: %v", err)
+		}
+		t.Fatalf("listen tcp: %v", err)
+	}
+	ln := tls.NewListener(base, &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12})
+	commands := make(chan string, 8)
+	go func() {
+		defer close(commands)
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		r := bufio.NewReader(conn)
+		w := bufio.NewWriter(conn)
+		writeIMAPLine(w, "* OK ready")
+		for {
+			line, err := r.ReadString('\n')
+			if err != nil {
+				return
+			}
+			line = strings.TrimRight(line, "\r\n")
+			commands <- line
+			fields := strings.Fields(line)
+			if len(fields) < 2 {
+				continue
+			}
+			tag := fields[0]
+			switch strings.ToUpper(fields[1]) {
+			case "LOGIN":
+				writeIMAPLine(w, tag+" OK LOGIN completed")
+			case "CAPABILITY":
+				writeIMAPLine(w, "* CAPABILITY IMAP4rev1 CONDSTORE")
+				writeIMAPLine(w, tag+" OK CAPABILITY completed")
+			case "EXAMINE":
+				writeIMAPLine(w, "* FLAGS (\\Seen)")
+				writeIMAPLine(w, "* 2 EXISTS")
+				writeIMAPLine(w, "* OK [UIDVALIDITY 777] UIDs valid")
+				writeIMAPLine(w, "* OK [UIDNEXT 21] next UID")
+				writeIMAPLine(w, "* OK [HIGHESTMODSEQ 42] modseq")
+				writeIMAPLine(w, tag+" OK [READ-ONLY] EXAMINE completed")
+			case "LOGOUT":
+				writeIMAPLine(w, "* BYE closing")
+				writeIMAPLine(w, tag+" OK LOGOUT completed")
+				return
+			default:
+				writeIMAPLine(w, tag+" BAD unsupported")
+			}
+		}
+	}()
+	return ln, roots, commands
 }
 
 func newLogoutStallingTLSServer(t *testing.T) (net.Listener, *x509.CertPool) {

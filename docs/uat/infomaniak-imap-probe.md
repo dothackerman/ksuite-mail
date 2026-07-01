@@ -58,8 +58,8 @@ Outcome:
 Expected behavior:
 
 - The probe reports sanitized `CAPABILITY` diagnostics.
-- The probe reports sanitized `LIST` diagnostics.
-- The probe reports read-only folder selection behavior through `EXAMINE` or read-only `SELECT`.
+- The probe reports sanitized `LIST` diagnostics as structured facts, including folder count and operational folder names.
+- The probe reports read-only folder selection behavior through `EXAMINE` or read-only `SELECT` as structured facts, including the daemon-selected diagnostic folder, `read_only = true`, and a stable selection mode.
 - Folder names may appear only as operational diagnostics.
 - Provider folder listing may be broader than the configured folder list for diagnostics such as Sent folder discovery, but message-level checks must stay bounded to daemon-selected diagnostic targets for the explicit account reference.
 
@@ -88,6 +88,7 @@ Expected behavior:
 
 - The probe reports `UIDVALIDITY`.
 - The probe reports `UIDNEXT`.
+- `UIDVALIDITY` and `UIDNEXT` appear as structured folder-state facts, not only as prose details.
 - The probe reports UID range search behavior using safe counts and booleans.
 - The probe reports `CONDSTORE` / `HIGHESTMODSEQ` support when available.
 

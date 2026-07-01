@@ -86,7 +86,10 @@ func (Runner) RunIMAP(ctx context.Context, src mail.Source, acct config.Account)
 		)
 		return response(acct, checks)
 	}
-	checks = append(checks, probeCheck(checkFolderListing, api.ProbeStatusPassed, "list_ok", "folder_count="+strconv.Itoa(len(folders))))
+	checks = append(checks, probeCheckFacts(checkFolderListing, api.ProbeStatusPassed, "list_ok", "folder_count="+strconv.Itoa(len(folders)), &api.ProbeFacts{
+		FolderCount: uintPtr(len(folders)),
+		Folders:     folders,
+	}))
 
 	folder := firstProbeFolder(acct)
 	if folder == "" {
@@ -107,7 +110,7 @@ func (Runner) RunIMAP(ctx context.Context, src mail.Source, acct config.Account)
 			)
 		} else if state.UIDVALIDITY == 0 || state.UIDNEXT == 0 {
 			detail := fmt.Sprintf("configured_folder=true uidvalidity_present=%t uidnext_present=%t", state.UIDVALIDITY != 0, state.UIDNEXT != 0)
-			checks = append(checks, probeCheck(checkFolderSelection, api.ProbeStatusInconclusive, "uid_state_required", detail))
+			checks = append(checks, probeCheckFacts(checkFolderSelection, api.ProbeStatusInconclusive, "uid_state_required", detail, folderStateFacts(folder, state, false)))
 			checks = append(checks,
 				probeNotRun(checkUIDBehavior),
 				domainProbeNotRun(acct),
@@ -115,7 +118,7 @@ func (Runner) RunIMAP(ctx context.Context, src mail.Source, acct config.Account)
 			)
 		} else {
 			detail := fmt.Sprintf("configured_folder=true uidvalidity=%d uidnext=%d highestmodseq=%d", state.UIDVALIDITY, state.UIDNEXT, state.HighestModSeq)
-			checks = append(checks, probeCheck(checkFolderSelection, api.ProbeStatusPassed, "examine_ok", detail))
+			checks = append(checks, probeCheckFacts(checkFolderSelection, api.ProbeStatusPassed, "examine_ok", detail, folderStateFacts(folder, state, true)))
 			checks = append(checks, probeUIDBehavior(ctx, src, acct, folder))
 			checks = append(checks, probeDomainHeaders(ctx, src, acct, folder))
 			checks = append(checks, probeReadState(ctx, src, acct, folder))
@@ -251,6 +254,42 @@ func probeFailure(id checkID, err error) api.ProbeCheck {
 
 func probeCheck(id checkID, status, code, detail string) api.ProbeCheck {
 	return api.ProbeCheck{ID: string(id), Status: status, Code: code, Detail: detail}
+}
+
+func probeCheckFacts(id checkID, status, code, detail string, facts *api.ProbeFacts) api.ProbeCheck {
+	check := probeCheck(id, status, code, detail)
+	check.Facts = facts
+	return check
+}
+
+func folderStateFacts(folder string, state mail.RemoteFolderState, includeUIDState bool) *api.ProbeFacts {
+	facts := &api.ProbeFacts{
+		Folder:        folder,
+		ReadOnly:      boolPtr(state.ReadOnly),
+		SelectionMode: state.SelectionMode,
+	}
+	if includeUIDState {
+		facts.UIDVALIDITY = uint64Ptr(state.UIDVALIDITY)
+		facts.UIDNEXT = uint64Ptr(state.UIDNEXT)
+		facts.HighestModSeq = int64Ptr(state.HighestModSeq)
+	}
+	return facts
+}
+
+func uintPtr(v int) *int {
+	return &v
+}
+
+func boolPtr(v bool) *bool {
+	return &v
+}
+
+func uint64Ptr(v uint64) *uint64 {
+	return &v
+}
+
+func int64Ptr(v int64) *int64 {
+	return &v
 }
 
 func probeSourceErrorCode(err error) string {

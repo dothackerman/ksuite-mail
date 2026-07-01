@@ -251,6 +251,67 @@ func TestRunnerRunIMAPChecklistMatrix(t *testing.T) {
 	}
 }
 
+func TestRunnerRunIMAPReportsStructuredFolderStateFacts(t *testing.T) {
+	source := probeAdapter(map[string][]mailfake.Message{
+		"INBOX": {{UID: 10, VisibleByPolicy: true, Body: "fixture body"}, {UID: 20, VisibleByPolicy: true}},
+		"Sent":  {},
+	})
+	source.SetUIDState("rs_info", "INBOX", 777, 21)
+	source.SetHighestModSeq("rs_info", "INBOX", 42)
+
+	got := providerprobe.Runner{}.RunIMAP(context.Background(), source, fullAccount("INBOX"))
+
+	folderListing := checkByID(t, got, "folder_listing")
+	if folderListing.Facts == nil {
+		t.Fatalf("folder listing facts missing: %+v", folderListing)
+	}
+	if folderListing.Facts.FolderCount == nil || *folderListing.Facts.FolderCount != 2 {
+		t.Fatalf("folder count facts = %+v, want 2", folderListing.Facts)
+	}
+	if want := []string{"INBOX", "Sent"}; !stringSlicesEqual(folderListing.Facts.Folders, want) {
+		t.Fatalf("folders facts = %v, want %v", folderListing.Facts.Folders, want)
+	}
+
+	folderSelection := checkByID(t, got, "folder_selection")
+	if folderSelection.Facts == nil {
+		t.Fatalf("folder selection facts missing: %+v", folderSelection)
+	}
+	if folderSelection.Facts.Folder != "INBOX" {
+		t.Fatalf("folder fact = %q, want INBOX", folderSelection.Facts.Folder)
+	}
+	if folderSelection.Facts.ReadOnly == nil || !*folderSelection.Facts.ReadOnly {
+		t.Fatalf("read_only fact = %+v, want true", folderSelection.Facts.ReadOnly)
+	}
+	if folderSelection.Facts.SelectionMode != "examine" {
+		t.Fatalf("selection_mode = %q, want examine", folderSelection.Facts.SelectionMode)
+	}
+	if folderSelection.Facts.UIDVALIDITY == nil || *folderSelection.Facts.UIDVALIDITY != 777 {
+		t.Fatalf("uidvalidity fact = %+v, want 777", folderSelection.Facts.UIDVALIDITY)
+	}
+	if folderSelection.Facts.UIDNEXT == nil || *folderSelection.Facts.UIDNEXT != 21 {
+		t.Fatalf("uidnext fact = %+v, want 21", folderSelection.Facts.UIDNEXT)
+	}
+	if folderSelection.Facts.HighestModSeq == nil || *folderSelection.Facts.HighestModSeq != 42 {
+		t.Fatalf("highestmodseq fact = %+v, want 42", folderSelection.Facts.HighestModSeq)
+	}
+	assertNoRawProviderLeak(t, got)
+}
+
+func TestRunnerRunIMAPOmitsUIDFactsWhenStateIsUnavailable(t *testing.T) {
+	got := providerprobe.Runner{}.RunIMAP(context.Background(), uidStateSource(0, 21), fullAccount("INBOX"))
+
+	folderSelection := checkByID(t, got, "folder_selection")
+	if folderSelection.Facts == nil {
+		t.Fatalf("folder selection facts missing: %+v", folderSelection)
+	}
+	if folderSelection.Facts.ReadOnly == nil || !*folderSelection.Facts.ReadOnly {
+		t.Fatalf("read_only fact = %+v, want true", folderSelection.Facts.ReadOnly)
+	}
+	if folderSelection.Facts.UIDVALIDITY != nil || folderSelection.Facts.UIDNEXT != nil {
+		t.Fatalf("uid facts = %+v, want omitted when state is incomplete", folderSelection.Facts)
+	}
+}
+
 func fullAccount(folders ...string) config.Account {
 	return config.Account{ID: "rs_info", Policy: config.PolicyFull, Folders: folders}
 }
@@ -365,4 +426,16 @@ func assertNoRawProviderLeak(t *testing.T, probe api.ProbeIMAPResponse) {
 			t.Fatalf("probe leaked %q in %s", leak, raw)
 		}
 	}
+}
+
+func stringSlicesEqual(got, want []string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			return false
+		}
+	}
+	return true
 }

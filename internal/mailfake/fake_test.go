@@ -150,6 +150,12 @@ func TestAdapterUIDVALIDITYCanBeReset(t *testing.T) {
 	if state.UIDVALIDITY != 777 {
 		t.Fatalf("uidvalidity = %d, want 777", state.UIDVALIDITY)
 	}
+	if !state.ReadOnly {
+		t.Fatalf("read-only = false, want true")
+	}
+	if state.SelectionMode != "examine" {
+		t.Fatalf("selection mode = %q, want examine", state.SelectionMode)
+	}
 }
 
 func TestAdapterResetCallsClearsHistory(t *testing.T) {
