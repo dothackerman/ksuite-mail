@@ -237,14 +237,18 @@ type ProbeCheck struct {
 // uses typed scalar fields instead of an open map so arbitrary provider text
 // cannot be threaded into diagnostics by accident.
 type ProbeFacts struct {
-	FolderCount   *int     `json:"folder_count,omitempty"`
-	Folders       []string `json:"folders,omitempty"`
-	Folder        string   `json:"folder,omitempty"`
-	ReadOnly      *bool    `json:"read_only,omitempty"`
-	SelectionMode string   `json:"selection_mode,omitempty"`
-	UIDVALIDITY   *uint64  `json:"uidvalidity,omitempty"`
-	UIDNEXT       *uint64  `json:"uidnext,omitempty"`
-	HighestModSeq *int64   `json:"highestmodseq,omitempty"`
+	FolderCount            *int     `json:"folder_count,omitempty"`
+	Folders                []string `json:"folders,omitempty"`
+	Folder                 string   `json:"folder,omitempty"`
+	ReadOnly               *bool    `json:"read_only,omitempty"`
+	SelectionMode          string   `json:"selection_mode,omitempty"`
+	CondstoreSupported     *bool    `json:"condstore_supported,omitempty"`
+	HighestModSeqAvailable *bool    `json:"highestmodseq_available,omitempty"`
+	UIDRangeSupported      *bool    `json:"uid_range_supported,omitempty"`
+	RefreshStrategy        string   `json:"refresh_strategy,omitempty"`
+	UIDVALIDITY            *uint64  `json:"uidvalidity,omitempty"`
+	UIDNEXT                *uint64  `json:"uidnext,omitempty"`
+	HighestModSeq          *int64   `json:"highestmodseq,omitempty"`
 }
 
 // ReadStatus determines which top-level status applies to read responses.
