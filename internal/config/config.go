@@ -146,6 +146,11 @@ func Validate(c *Config) error {
 			if len(a.Domains) == 0 {
 				problems = append(problems, fmt.Errorf("%s: domain policy requires a non-empty domains list", label))
 			}
+			for domainIndex, domain := range a.Domains {
+				if strings.TrimSpace(domain) == "" {
+					problems = append(problems, fmt.Errorf("%s: domains[%d] must not be empty", label, domainIndex))
+				}
+			}
 		case "":
 			problems = append(problems, fmt.Errorf("%s: policy is required", label))
 		default:

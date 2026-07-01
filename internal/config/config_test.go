@@ -89,6 +89,10 @@ func TestValidateAccountProblems(t *testing.T) {
 			ID: "a", Email: "a@b.c", Host: "h", Port: 993, Username: "u",
 			PasswordRef: PasswordRef{ID: "x"}, Policy: PolicyDomain, Folders: []string{"INBOX"},
 		},
+		"domain policy with whitespace domain": {
+			ID: "a", Email: "a@b.c", Host: "h", Port: 993, Username: "u",
+			PasswordRef: PasswordRef{ID: "x"}, Policy: PolicyDomain, Domains: []string{" \t"}, Folders: []string{"INBOX"},
+		},
 		"no folders": {
 			ID: "a", Email: "a@b.c", Host: "h", Port: 993, Username: "u",
 			PasswordRef: PasswordRef{ID: "x"}, Policy: PolicyFull,
