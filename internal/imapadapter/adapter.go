@@ -189,9 +189,19 @@ func (s *Source) FetchBodyPreviewAndSeenState(ctx context.Context, acct config.A
 	if maxBytes > 0 {
 		bodySection.Partial = &imap.SectionPartial{Offset: 0, Size: int64(maxBytes)}
 	}
-	afterBuf, err := c.client.Fetch(uidSet, &imap.FetchOptions{
-		Flags:       true,
+	bodyBuf, err := c.client.Fetch(uidSet, &imap.FetchOptions{
 		BodySection: []*imap.FetchItemBodySection{bodySection},
+	}).Collect()
+	if err != nil {
+		return "", mail.ReadStateProbeResult{}, normalizeCommandError(err)
+	}
+	if len(bodyBuf) == 0 {
+		return "", mail.ReadStateProbeResult{}, nil
+	}
+	preview := string(bodyBuf[0].FindBodySection(bodySection))
+
+	afterBuf, err := c.client.Fetch(uidSet, &imap.FetchOptions{
+		Flags: true,
 	}).Collect()
 	if err != nil {
 		return "", mail.ReadStateProbeResult{}, normalizeCommandError(err)
@@ -200,7 +210,6 @@ func (s *Source) FetchBodyPreviewAndSeenState(ctx context.Context, acct config.A
 		return "", mail.ReadStateProbeResult{}, nil
 	}
 	seenAfter := hasSeenFlag(afterBuf[0].Flags)
-	preview := string(afterBuf[0].FindBodySection(bodySection))
 	return preview, mail.ReadStateProbeResult{
 		Observed:   true,
 		SeenBefore: seenBefore,

@@ -209,11 +209,20 @@ func probeReadState(ctx context.Context, src mail.Source, acct config.Account, f
 	if len(uids) == 0 {
 		return probeCheck(checkReadState, api.ProbeStatusInconclusive, "fixture_required", "BODY.PEEK read-state fixture is required")
 	}
-	_, seenState, err := src.FetchBodyPreviewAndSeenState(ctx, acct, folder, uids[0], 1)
-	if err != nil {
-		return probeFailure(checkReadState, err)
+	var seenState mail.ReadStateProbeResult
+	foundFixture := false
+	for _, uid := range uids {
+		var err error
+		_, seenState, err = src.FetchBodyPreviewAndSeenState(ctx, acct, folder, uid, 1)
+		if err != nil {
+			return probeFailure(checkReadState, err)
+		}
+		if seenState.Observed && !seenState.SeenBefore {
+			foundFixture = true
+			break
+		}
 	}
-	if !seenState.Observed || seenState.SeenBefore {
+	if !foundFixture {
 		return probeCheck(checkReadState, api.ProbeStatusInconclusive, "fixture_required", "BODY.PEEK read-state fixture is required")
 	}
 	seenChanged := seenState.SeenAfter

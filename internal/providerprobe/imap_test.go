@@ -247,7 +247,7 @@ func TestRunnerRunIMAPChecklistMatrix(t *testing.T) {
 			wantReadStatePreserved: boolPtr(false),
 		},
 		{
-			name:    "read state already seen fixture is inconclusive",
+			name:    "read state skips already seen fixture",
 			account: fullAccount("INBOX"),
 			source: probeAdapter(map[string][]mailfake.Message{
 				"INBOX": {
@@ -255,11 +255,27 @@ func TestRunnerRunIMAPChecklistMatrix(t *testing.T) {
 					{UID: 20, VisibleByPolicy: true, Body: "fixture body"},
 				},
 			}),
+			wantStatus: api.ProbeStatusPassed,
+			want: map[string]api.ProbeCheck{
+				"read_state": {Status: api.ProbeStatusPassed, Code: "body_peek_ok"},
+			},
+			wantCalls:              []string{"capability", "folders", "select", "list", "list", "list", "preview", "preview"},
+			wantReadStatePreserved: boolPtr(true),
+		},
+		{
+			name:    "read state requires an unseen fixture",
+			account: fullAccount("INBOX"),
+			source: probeAdapter(map[string][]mailfake.Message{
+				"INBOX": {
+					{UID: 10, VisibleByPolicy: true, Body: "fixture body", Seen: true},
+					{UID: 20, VisibleByPolicy: true, Body: "fixture body", Seen: true},
+				},
+			}),
 			wantStatus: api.ProbeStatusInconclusive,
 			want: map[string]api.ProbeCheck{
 				"read_state": {Status: api.ProbeStatusInconclusive, Code: "fixture_required", Detail: "BODY.PEEK read-state fixture is required"},
 			},
-			wantCalls: []string{"capability", "folders", "select", "list", "list", "list", "preview"},
+			wantCalls: []string{"capability", "folders", "select", "list", "list", "list", "preview", "preview"},
 		},
 		{
 			name:    "read state unobserved fixture is inconclusive",
