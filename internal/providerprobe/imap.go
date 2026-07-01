@@ -159,11 +159,13 @@ func probeDomainHeaders(ctx context.Context, src mail.Source, acct config.Accoun
 	headers := []string{"From", "To", "Cc", "Bcc"}
 	counts := make([]string, 0, len(headers)*len(acct.Domains))
 	missingFixture := false
+	checkedDomain := false
 	for _, domain := range acct.Domains {
 		domain = strings.TrimSpace(domain)
 		if domain == "" {
 			continue
 		}
+		checkedDomain = true
 		for _, header := range headers {
 			targetFolder := folder
 			if header == "Bcc" && sentFolder != "" {
@@ -186,6 +188,9 @@ func probeDomainHeaders(ctx context.Context, src mail.Source, acct config.Accoun
 			}
 			counts = append(counts, strings.ToLower(header)+"_count="+strconv.Itoa(len(uids)))
 		}
+	}
+	if !checkedDomain {
+		return probeCheck(checkDomainHeader, api.ProbeStatusInconclusive, "no_domain", "domain-policy account has no configured domain")
 	}
 	if missingFixture {
 		return probeCheck(checkDomainHeader, api.ProbeStatusInconclusive, "fixture_required", strings.Join(counts, " "))

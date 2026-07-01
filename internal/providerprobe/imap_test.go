@@ -158,6 +158,15 @@ func TestRunnerRunIMAPChecklistMatrix(t *testing.T) {
 			},
 		},
 		{
+			name:       "domain policy with only whitespace domains is inconclusive",
+			account:    domainAccount("INBOX", " ", "\t"),
+			source:     probeAdapter(map[string][]mailfake.Message{"INBOX": {{UID: 10, VisibleByPolicy: true}, {UID: 20, VisibleByPolicy: true, Body: "body"}}}),
+			wantStatus: api.ProbeStatusInconclusive,
+			want: map[string]api.ProbeCheck{
+				"domain_header_search": {Status: api.ProbeStatusInconclusive, Code: "no_domain", Detail: "domain-policy account has no configured domain"},
+			},
+		},
+		{
 			name:       "provider errors never expose raw provider text",
 			account:    fullAccount("INBOX"),
 			source:     probeAdapter(map[string][]mailfake.Message{"INBOX": {{UID: 10, VisibleByPolicy: true}, {UID: 20, VisibleByPolicy: true}}}, sourceFailure{method: "list", account: "rs_info", folder: "INBOX", err: errors.New("UID SEARCH leaked info@example.com pw private text")}),
