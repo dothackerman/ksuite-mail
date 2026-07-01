@@ -405,13 +405,24 @@ func TestRunnerRunIMAPReportsDomainHeaderSearchOverbroadFacts(t *testing.T) {
 			{UID: 10, VisibleByPolicy: true},
 			{UID: 20, VisibleByPolicy: true},
 		},
+		"Sent": {
+			{UID: 30, VisibleByPolicy: true},
+			{UID: 40, VisibleByPolicy: true},
+		},
 	})
-	for _, header := range []string{"From", "To", "Cc", "Bcc"} {
+	for _, header := range []string{"From", "To", "Cc"} {
 		source.SetSearchResult("rs_info", "INBOX", header, "regenerativ.ch", []mail.UID{10})
 		source.SetSearchResult("rs_info", "INBOX", header, "ksuite-mail-probe.invalid", []mail.UID{20})
 	}
+	source.SetSearchResult("rs_info", "Sent", "Bcc", "regenerativ.ch", []mail.UID{30})
+	source.SetSearchResult("rs_info", "Sent", "Bcc", "ksuite-mail-probe.invalid", []mail.UID{40})
 
-	got := providerprobe.Runner{}.RunIMAP(context.Background(), source, domainAccount("INBOX", "regenerativ.ch"))
+	got := providerprobe.Runner{}.RunIMAP(context.Background(), source, config.Account{
+		ID:      "rs_info",
+		Policy:  config.PolicyDomain,
+		Domains: []string{"regenerativ.ch"},
+		Folders: []string{"INBOX", "Sent"},
+	})
 
 	check := checkByID(t, got, "domain_header_search")
 	if check.Status != api.ProbeStatusFailed || check.Code != "header_search_overbroad" {
