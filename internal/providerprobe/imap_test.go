@@ -364,16 +364,16 @@ func TestRunnerRunIMAPReportsStructuredDomainHeaderSearchFacts(t *testing.T) {
 			t.Fatalf("fact should not expose nonmatching_visible=true for %s", fact.Header)
 		}
 	}
-	if gotCount := m["From#10"]; gotCount != 1 {
+	if gotCount := m["From#1"]; gotCount != 1 {
 		t.Fatalf("from fact count = %d, want 1", gotCount)
 	}
-	if gotCount := m["To#10"]; gotCount != 1 {
+	if gotCount := m["To#1"]; gotCount != 1 {
 		t.Fatalf("to fact count = %d, want 1", gotCount)
 	}
-	if gotCount := m["Cc#20"]; gotCount != 1 {
+	if gotCount := m["Cc#1"]; gotCount != 1 {
 		t.Fatalf("cc fact count = %d, want 1", gotCount)
 	}
-	if gotCount := m["Bcc#20"]; gotCount != 1 {
+	if gotCount := m["Bcc#1"]; gotCount != 1 {
 		t.Fatalf("bcc fact count = %d, want 1", gotCount)
 	}
 }
