@@ -1,0 +1,321 @@
+package providerprobe_test
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"testing"
+
+	"github.com/dothackerman/ksuite-mail/internal/api"
+	"github.com/dothackerman/ksuite-mail/internal/config"
+	"github.com/dothackerman/ksuite-mail/internal/mail"
+	"github.com/dothackerman/ksuite-mail/internal/mailfake"
+	"github.com/dothackerman/ksuite-mail/internal/providerprobe"
+)
+
+func TestRunnerRunIMAPChecklistMatrix(t *testing.T) {
+	tests := []struct {
+		name       string
+		account    config.Account
+		source     mail.Source
+		want       map[string]api.ProbeCheck
+		wantOrder  []string
+		wantCalls  []string
+		wantStatus string
+	}{
+		{
+			name:    "capability failure skips dependent checks",
+			account: domainAccount("INBOX", "regenerativ.ch"),
+			source: probeAdapter(
+				map[string][]mailfake.Message{"INBOX": {{UID: 10, VisibleByPolicy: true}, {UID: 20, VisibleByPolicy: true}}},
+				sourceFailure{method: "capability", account: "rs_info", err: errors.New("NO auth failed with pw and private text")},
+			),
+			wantStatus: api.ProbeStatusFailed,
+			want: map[string]api.ProbeCheck{
+				"capability":           {Status: api.ProbeStatusFailed, Code: "remote_failed", Detail: "provider probe failed"},
+				"folder_listing":       {Status: api.ProbeStatusInconclusive, Code: "prerequisite_failed"},
+				"folder_selection":     {Status: api.ProbeStatusInconclusive, Code: "prerequisite_failed"},
+				"uid_behavior":         {Status: api.ProbeStatusInconclusive, Code: "prerequisite_failed"},
+				"domain_header_search": {Status: api.ProbeStatusInconclusive, Code: "prerequisite_failed"},
+				"read_state":           {Status: api.ProbeStatusInconclusive, Code: "prerequisite_failed"},
+			},
+			wantCalls: []string{"capability"},
+		},
+		{
+			name:    "folder listing failure skips dependent checks",
+			account: domainAccount("INBOX", "regenerativ.ch"),
+			source: probeAdapter(
+				map[string][]mailfake.Message{"INBOX": {{UID: 10, VisibleByPolicy: true}, {UID: 20, VisibleByPolicy: true}}},
+				sourceFailure{method: "folders", account: "rs_info", err: errors.New("LIST failed with provider text")},
+			),
+			wantStatus: api.ProbeStatusFailed,
+			want: map[string]api.ProbeCheck{
+				"capability":           {Status: api.ProbeStatusPassed, Code: "capability_ok"},
+				"folder_listing":       {Status: api.ProbeStatusFailed, Code: "remote_failed", Detail: "provider probe failed"},
+				"folder_selection":     {Status: api.ProbeStatusInconclusive, Code: "prerequisite_failed"},
+				"uid_behavior":         {Status: api.ProbeStatusInconclusive, Code: "prerequisite_failed"},
+				"domain_header_search": {Status: api.ProbeStatusInconclusive, Code: "prerequisite_failed"},
+				"read_state":           {Status: api.ProbeStatusInconclusive, Code: "prerequisite_failed"},
+			},
+			wantCalls: []string{"capability", "folders"},
+		},
+		{
+			name:       "empty folder list yields fixture required",
+			account:    domainAccount("INBOX", "regenerativ.ch"),
+			source:     probeAdapter(map[string][]mailfake.Message{}),
+			wantStatus: api.ProbeStatusInconclusive,
+			want: map[string]api.ProbeCheck{
+				"folder_listing":       {Status: api.ProbeStatusInconclusive, Code: "fixture_required", Detail: "folder_count=0"},
+				"folder_selection":     {Status: api.ProbeStatusInconclusive, Code: "prerequisite_failed"},
+				"uid_behavior":         {Status: api.ProbeStatusInconclusive, Code: "prerequisite_failed"},
+				"domain_header_search": {Status: api.ProbeStatusInconclusive, Code: "prerequisite_failed"},
+				"read_state":           {Status: api.ProbeStatusInconclusive, Code: "prerequisite_failed"},
+			},
+			wantCalls: []string{"capability", "folders"},
+		},
+		{
+			name:    "folder selection failure skips dependent checks",
+			account: domainAccount("INBOX", "regenerativ.ch"),
+			source: probeAdapter(
+				map[string][]mailfake.Message{"INBOX": {{UID: 10, VisibleByPolicy: true}, {UID: 20, VisibleByPolicy: true}}},
+				sourceFailure{method: "select", account: "rs_info", folder: "INBOX", err: errors.New("EXAMINE failed with private text")},
+			),
+			wantStatus: api.ProbeStatusFailed,
+			want: map[string]api.ProbeCheck{
+				"folder_selection":     {Status: api.ProbeStatusFailed, Code: "remote_failed", Detail: "provider probe failed"},
+				"uid_behavior":         {Status: api.ProbeStatusInconclusive, Code: "prerequisite_failed"},
+				"domain_header_search": {Status: api.ProbeStatusInconclusive, Code: "prerequisite_failed"},
+				"read_state":           {Status: api.ProbeStatusInconclusive, Code: "prerequisite_failed"},
+			},
+			wantCalls: []string{"capability", "folders", "select"},
+		},
+		{
+			name:       "nil source returns sanitized unavailable checks",
+			account:    domainAccount("INBOX", "regenerativ.ch"),
+			source:     nil,
+			wantStatus: api.ProbeStatusFailed,
+			want: map[string]api.ProbeCheck{
+				"capability":           {Status: api.ProbeStatusFailed, Code: "source_unavailable", Detail: "mail source is unavailable"},
+				"folder_listing":       {Status: api.ProbeStatusFailed, Code: "source_unavailable", Detail: "mail source is unavailable"},
+				"folder_selection":     {Status: api.ProbeStatusFailed, Code: "source_unavailable", Detail: "mail source is unavailable"},
+				"uid_behavior":         {Status: api.ProbeStatusFailed, Code: "source_unavailable", Detail: "mail source is unavailable"},
+				"domain_header_search": {Status: api.ProbeStatusInconclusive, Code: "prerequisite_failed"},
+				"read_state":           {Status: api.ProbeStatusInconclusive, Code: "fixture_required", Detail: "BODY.PEEK read-state fixture is required"},
+			},
+		},
+		{
+			name:       "missing configured folder yields no configured folder outcomes",
+			account:    fullAccount(" "),
+			source:     probeAdapter(map[string][]mailfake.Message{"INBOX": {{UID: 10, VisibleByPolicy: true}, {UID: 20, VisibleByPolicy: true}}}),
+			wantStatus: api.ProbeStatusInconclusive,
+			want: map[string]api.ProbeCheck{
+				"folder_selection":     {Status: api.ProbeStatusInconclusive, Code: "no_configured_folder"},
+				"uid_behavior":         {Status: api.ProbeStatusInconclusive, Code: "no_configured_folder"},
+				"domain_header_search": {Status: api.ProbeStatusNotApplicable, Code: "full_policy"},
+				"read_state":           {Status: api.ProbeStatusInconclusive, Code: "no_configured_folder"},
+			},
+			wantCalls: []string{"capability", "folders"},
+		},
+		{
+			name:       "uid state absence requires fixture state",
+			account:    fullAccount("INBOX"),
+			source:     uidStateSource(0, 11),
+			wantStatus: api.ProbeStatusInconclusive,
+			want: map[string]api.ProbeCheck{
+				"folder_selection":     {Status: api.ProbeStatusInconclusive, Code: "uid_state_required"},
+				"uid_behavior":         {Status: api.ProbeStatusInconclusive, Code: "prerequisite_failed"},
+				"domain_header_search": {Status: api.ProbeStatusNotApplicable, Code: "full_policy"},
+				"read_state":           {Status: api.ProbeStatusInconclusive, Code: "prerequisite_failed"},
+			},
+		},
+		{
+			name:       "full policy domain check is not applicable",
+			account:    fullAccount("INBOX"),
+			source:     probeAdapter(map[string][]mailfake.Message{"INBOX": {{UID: 10, VisibleByPolicy: true}, {UID: 20, VisibleByPolicy: true, Body: "body"}}}),
+			wantStatus: api.ProbeStatusPassed,
+			want: map[string]api.ProbeCheck{
+				"domain_header_search": {Status: api.ProbeStatusNotApplicable, Code: "full_policy"},
+			},
+		},
+		{
+			name:       "domain policy missing fixtures is inconclusive",
+			account:    domainAccount("INBOX", "regenerativ.ch"),
+			source:     domainFixtureSource(map[string][]mail.UID{"From": {10}}),
+			wantStatus: api.ProbeStatusInconclusive,
+			want: map[string]api.ProbeCheck{
+				"domain_header_search": {Status: api.ProbeStatusInconclusive, Code: "fixture_required"},
+			},
+		},
+		{
+			name:       "provider errors never expose raw provider text",
+			account:    fullAccount("INBOX"),
+			source:     probeAdapter(map[string][]mailfake.Message{"INBOX": {{UID: 10, VisibleByPolicy: true}, {UID: 20, VisibleByPolicy: true}}}, sourceFailure{method: "list", account: "rs_info", folder: "INBOX", err: errors.New("UID SEARCH leaked info@example.com pw private text")}),
+			wantStatus: api.ProbeStatusFailed,
+			want: map[string]api.ProbeCheck{
+				"uid_behavior": {Status: api.ProbeStatusFailed, Code: "remote_failed", Detail: "provider probe failed"},
+			},
+		},
+		{
+			name:       "failed status outranks inconclusive and passed",
+			account:    fullAccount("INBOX"),
+			source:     rangeIgnoringSource{Source: probeAdapter(map[string][]mailfake.Message{"INBOX": {{UID: 10, VisibleByPolicy: true}, {UID: 20, VisibleByPolicy: true}}})},
+			wantStatus: api.ProbeStatusFailed,
+			want: map[string]api.ProbeCheck{
+				"uid_behavior":         {Status: api.ProbeStatusFailed, Code: "uid_range_mismatch"},
+				"domain_header_search": {Status: api.ProbeStatusNotApplicable, Code: "full_policy"},
+			},
+		},
+		{
+			name:       "inconclusive status outranks passed",
+			account:    fullAccount("INBOX"),
+			source:     probeAdapter(map[string][]mailfake.Message{"INBOX": {{UID: 10, VisibleByPolicy: true}}}),
+			wantStatus: api.ProbeStatusInconclusive,
+			want: map[string]api.ProbeCheck{
+				"uid_behavior": {Status: api.ProbeStatusInconclusive, Code: "fixture_required"},
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := providerprobe.Runner{}.RunIMAP(context.Background(), tc.source, tc.account)
+			if got.Account != "rs_info" {
+				t.Fatalf("account = %q, want rs_info", got.Account)
+			}
+			if got.Status != tc.wantStatus {
+				t.Fatalf("status = %q, want %q; checks=%+v", got.Status, tc.wantStatus, got.Checks)
+			}
+			assertCheckOrder(t, got, tc.wantOrder)
+			for id, want := range tc.want {
+				gotCheck := checkByID(t, got, id)
+				if gotCheck.Status != want.Status || gotCheck.Code != want.Code {
+					t.Fatalf("%s = %+v, want status=%q code=%q", id, gotCheck, want.Status, want.Code)
+				}
+				if want.Detail != "" && gotCheck.Detail != want.Detail {
+					t.Fatalf("%s detail = %q, want %q", id, gotCheck.Detail, want.Detail)
+				}
+			}
+			if tc.wantCalls != nil {
+				assertCallMethods(t, tc.source, tc.wantCalls)
+			}
+			assertNoRawProviderLeak(t, got)
+		})
+	}
+}
+
+func fullAccount(folders ...string) config.Account {
+	return config.Account{ID: "rs_info", Policy: config.PolicyFull, Folders: folders}
+}
+
+func domainAccount(folder string, domains ...string) config.Account {
+	return config.Account{ID: "rs_info", Policy: config.PolicyDomain, Domains: domains, Folders: []string{folder}}
+}
+
+type sourceFailure struct {
+	method  string
+	account string
+	folder  string
+	arg     string
+	err     error
+}
+
+func probeAdapter(folders map[string][]mailfake.Message, failures ...sourceFailure) *mailfake.Adapter {
+	adapter := mailfake.NewAdapter(map[string]map[string][]mailfake.Message{"rs_info": folders})
+	for _, failure := range failures {
+		adapter.SetFailure(failure.method, failure.account, failure.folder, failure.arg, failure.err)
+	}
+	return adapter
+}
+
+func uidStateSource(uidvalidity, uidnext uint64) mail.Source {
+	adapter := probeAdapter(map[string][]mailfake.Message{"INBOX": {{UID: 10, VisibleByPolicy: true}, {UID: 20, VisibleByPolicy: true}}})
+	adapter.SetUIDState("rs_info", "INBOX", uidvalidity, uidnext)
+	return adapter
+}
+
+func domainFixtureSource(results map[string][]mail.UID) mail.Source {
+	adapter := probeAdapter(map[string][]mailfake.Message{"INBOX": {{UID: 10, VisibleByPolicy: true}, {UID: 20, VisibleByPolicy: true}}})
+	for _, header := range []string{"From", "To", "Cc", "Bcc"} {
+		adapter.SetSearchResult("rs_info", "INBOX", header, "regenerativ.ch", results[header])
+		adapter.SetSearchResult("rs_info", "INBOX", header, "ksuite-mail-probe.invalid", nil)
+	}
+	return adapter
+}
+
+type rangeIgnoringSource struct {
+	mail.Source
+}
+
+func (s rangeIgnoringSource) ListUIDs(ctx context.Context, acct config.Account, folder string, _ mail.UIDRange) ([]mail.UID, error) {
+	return s.Source.ListUIDs(ctx, acct, folder, mail.UIDRange{})
+}
+
+func checkByID(t *testing.T, probe api.ProbeIMAPResponse, id string) api.ProbeCheck {
+	t.Helper()
+	for _, check := range probe.Checks {
+		if check.ID == id {
+			return check
+		}
+	}
+	t.Fatalf("probe check %q missing from %+v", id, probe.Checks)
+	return api.ProbeCheck{}
+}
+
+func assertCheckOrder(t *testing.T, probe api.ProbeIMAPResponse, want []string) {
+	t.Helper()
+	if want == nil {
+		want = []string{
+			"account_selection",
+			"fixed_checklist",
+			"capability",
+			"folder_listing",
+			"folder_selection",
+			"uid_behavior",
+			"domain_header_search",
+			"read_state",
+		}
+	}
+	if len(probe.Checks) != len(want) {
+		t.Fatalf("check count = %d, want %d: %+v", len(probe.Checks), len(want), probe.Checks)
+	}
+	for i, id := range want {
+		if probe.Checks[i].ID != id {
+			t.Fatalf("check[%d].ID = %q, want %q; checks=%+v", i, probe.Checks[i].ID, id, probe.Checks)
+		}
+	}
+}
+
+func assertCallMethods(t *testing.T, src mail.Source, want []string) {
+	t.Helper()
+	adapter, ok := src.(*mailfake.Adapter)
+	if !ok {
+		t.Fatalf("source %T does not expose call methods", src)
+	}
+	calls := adapter.CallsSnapshot()
+	got := make([]string, len(calls))
+	for i, call := range calls {
+		got[i] = call.Method
+	}
+	if len(got) != len(want) {
+		t.Fatalf("calls = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("calls = %v, want %v", got, want)
+		}
+	}
+}
+
+func assertNoRawProviderLeak(t *testing.T, probe api.ProbeIMAPResponse) {
+	t.Helper()
+	raw, err := json.Marshal(probe)
+	if err != nil {
+		t.Fatalf("marshal probe: %v", err)
+	}
+	for _, leak := range [][]byte{[]byte("pw"), []byte("private text"), []byte("auth failed"), []byte("provider text"), []byte("info@example.com"), []byte("UID SEARCH leaked")} {
+		if bytes.Contains(raw, leak) {
+			t.Fatalf("probe leaked %q in %s", leak, raw)
+		}
+	}
+}
