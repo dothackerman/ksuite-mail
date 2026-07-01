@@ -444,22 +444,23 @@ func (a *Adapter) FetchBodyPreview(ctx context.Context, acct config.Account, fol
 	return body, err
 }
 
-// FetchBodyPreviewAndSeenState returns a bounded body preview and whether it flips seen.
-func (a *Adapter) FetchBodyPreviewAndSeenState(_ context.Context, acct config.Account, folder string, uid mail.UID, maxBytes int) (string, bool, error) {
+// FetchBodyPreviewAndSeenState returns a bounded body preview with observed
+// before/after seen state.
+func (a *Adapter) FetchBodyPreviewAndSeenState(_ context.Context, acct config.Account, folder string, uid mail.UID, maxBytes int) (string, mail.ReadStateProbeResult, error) {
 	a.appendCall(methodPreview, acct.ID, folder, "uid="+fmt.Sprintf("%d", uid))
 	if err := a.checkFailure(methodPreview, acct.ID, folder, ""); err != nil {
-		return "", false, err
+		return "", mail.ReadStateProbeResult{}, err
 	}
 	fd, ok := a.folder(acct, folder)
 	if !ok {
-		return "", false, errors.New("folder not found: " + acct.ID + ":" + folder)
+		return "", mail.ReadStateProbeResult{}, errors.New("folder not found: " + acct.ID + ":" + folder)
 	}
 	msg, ok := fd.Messages[uid]
 	if !ok {
-		return "", false, errors.New("message not found")
+		return "", mail.ReadStateProbeResult{}, errors.New("message not found")
 	}
 	if maxBytes <= 0 {
-		return msg.Body, false, nil
+		return msg.Body, mail.ReadStateProbeResult{Observed: true, SeenBefore: msg.Seen, SeenAfter: msg.Seen}, nil
 	}
 	body := msg.Body
 	if len(body) > maxBytes {
@@ -467,7 +468,7 @@ func (a *Adapter) FetchBodyPreviewAndSeenState(_ context.Context, acct config.Ac
 	}
 	seenBefore := msg.Seen
 	seenAfter := seenBefore || msg.MarksSeenOnPreview
-	return body, !seenBefore && seenAfter, nil
+	return body, mail.ReadStateProbeResult{Observed: true, SeenBefore: seenBefore, SeenAfter: seenAfter}, nil
 }
 
 func (a *Adapter) folder(acct config.Account, folder string) (FolderData, bool) {

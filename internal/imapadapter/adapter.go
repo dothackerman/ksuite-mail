@@ -161,15 +161,16 @@ func (s *Source) FetchBodyPreview(ctx context.Context, acct config.Account, fold
 	return preview, err
 }
 
-// FetchBodyPreviewAndSeenState returns a bounded body preview and whether BODY.PEEK flipped \\Seen.
-func (s *Source) FetchBodyPreviewAndSeenState(ctx context.Context, acct config.Account, folder string, uid mail.UID, maxBytes int) (string, bool, error) {
+// FetchBodyPreviewAndSeenState returns a bounded body preview with observed
+// before/after \\Seen state.
+func (s *Source) FetchBodyPreviewAndSeenState(ctx context.Context, acct config.Account, folder string, uid mail.UID, maxBytes int) (string, mail.ReadStateProbeResult, error) {
 	c, err := s.connect(ctx, acct)
 	if err != nil {
-		return "", false, err
+		return "", mail.ReadStateProbeResult{}, err
 	}
 	defer c.close()
 	if _, err := c.client.Select(folder, &imap.SelectOptions{ReadOnly: true}).Wait(); err != nil {
-		return "", false, normalizeCommandError(err)
+		return "", mail.ReadStateProbeResult{}, normalizeCommandError(err)
 	}
 
 	uidSet := imap.UIDSetNum(imap.UID(uid))
@@ -177,10 +178,10 @@ func (s *Source) FetchBodyPreviewAndSeenState(ctx context.Context, acct config.A
 		Flags: true,
 	}).Collect()
 	if err != nil {
-		return "", false, normalizeCommandError(err)
+		return "", mail.ReadStateProbeResult{}, normalizeCommandError(err)
 	}
 	if len(beforeBuf) == 0 {
-		return "", false, nil
+		return "", mail.ReadStateProbeResult{}, nil
 	}
 	seenBefore := hasSeenFlag(beforeBuf[0].Flags)
 
@@ -193,15 +194,18 @@ func (s *Source) FetchBodyPreviewAndSeenState(ctx context.Context, acct config.A
 		BodySection: []*imap.FetchItemBodySection{bodySection},
 	}).Collect()
 	if err != nil {
-		return "", false, normalizeCommandError(err)
+		return "", mail.ReadStateProbeResult{}, normalizeCommandError(err)
 	}
 	if len(afterBuf) == 0 {
-		return "", false, nil
+		return "", mail.ReadStateProbeResult{}, nil
 	}
 	seenAfter := hasSeenFlag(afterBuf[0].Flags)
-	seenChanged := !seenBefore && seenAfter
 	preview := string(afterBuf[0].FindBodySection(bodySection))
-	return preview, seenChanged, nil
+	return preview, mail.ReadStateProbeResult{
+		Observed:   true,
+		SeenBefore: seenBefore,
+		SeenAfter:  seenAfter,
+	}, nil
 
 }
 

@@ -1473,8 +1473,8 @@ func (s *trackingSource) FetchBodyPreview(context.Context, config.Account, strin
 	return "", nil
 }
 
-func (s *trackingSource) FetchBodyPreviewAndSeenState(context.Context, config.Account, string, mail.UID, int) (string, bool, error) {
-	return "", false, nil
+func (s *trackingSource) FetchBodyPreviewAndSeenState(context.Context, config.Account, string, mail.UID, int) (string, mail.ReadStateProbeResult, error) {
+	return "", mail.ReadStateProbeResult{}, nil
 }
 
 func mustOpenRepoForRefresh(t *testing.T) *cache.Repository {

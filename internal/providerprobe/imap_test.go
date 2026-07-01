@@ -247,6 +247,35 @@ func TestRunnerRunIMAPChecklistMatrix(t *testing.T) {
 			wantReadStatePreserved: boolPtr(false),
 		},
 		{
+			name:    "read state already seen fixture is inconclusive",
+			account: fullAccount("INBOX"),
+			source: probeAdapter(map[string][]mailfake.Message{
+				"INBOX": {
+					{UID: 10, VisibleByPolicy: true, Body: "fixture body", Seen: true},
+					{UID: 20, VisibleByPolicy: true, Body: "fixture body"},
+				},
+			}),
+			wantStatus: api.ProbeStatusInconclusive,
+			want: map[string]api.ProbeCheck{
+				"read_state": {Status: api.ProbeStatusInconclusive, Code: "fixture_required", Detail: "BODY.PEEK read-state fixture is required"},
+			},
+			wantCalls: []string{"capability", "folders", "select", "list", "list", "list", "preview"},
+		},
+		{
+			name:    "read state unobserved fixture is inconclusive",
+			account: fullAccount("INBOX"),
+			source: unobservedReadStateSource{Source: probeAdapter(map[string][]mailfake.Message{
+				"INBOX": {
+					{UID: 10, VisibleByPolicy: true, Body: "fixture body"},
+					{UID: 20, VisibleByPolicy: true, Body: "fixture body"},
+				},
+			})},
+			wantStatus: api.ProbeStatusInconclusive,
+			want: map[string]api.ProbeCheck{
+				"read_state": {Status: api.ProbeStatusInconclusive, Code: "fixture_required", Detail: "BODY.PEEK read-state fixture is required"},
+			},
+		},
+		{
 			name:       "read state preview errors are sanitized",
 			account:    fullAccount("INBOX"),
 			source:     probeAdapter(map[string][]mailfake.Message{"INBOX": {{UID: 10, VisibleByPolicy: true}, {UID: 20, VisibleByPolicy: true}}}, sourceFailure{method: "preview", account: "rs_info", folder: "INBOX", err: errors.New("FETCH leaked subject pw private text")}),
@@ -416,6 +445,14 @@ type rangeIgnoringSource struct {
 
 func (s rangeIgnoringSource) ListUIDs(ctx context.Context, acct config.Account, folder string, _ mail.UIDRange) ([]mail.UID, error) {
 	return s.Source.ListUIDs(ctx, acct, folder, mail.UIDRange{})
+}
+
+type unobservedReadStateSource struct {
+	mail.Source
+}
+
+func (s unobservedReadStateSource) FetchBodyPreviewAndSeenState(context.Context, config.Account, string, mail.UID, int) (string, mail.ReadStateProbeResult, error) {
+	return "", mail.ReadStateProbeResult{}, nil
 }
 
 func checkByID(t *testing.T, probe api.ProbeIMAPResponse, id string) api.ProbeCheck {
