@@ -17,13 +17,14 @@ import (
 
 func TestRunnerRunIMAPChecklistMatrix(t *testing.T) {
 	tests := []struct {
-		name       string
-		account    config.Account
-		source     mail.Source
-		want       map[string]api.ProbeCheck
-		wantOrder  []string
-		wantCalls  []string
-		wantStatus string
+		name                   string
+		account                config.Account
+		source                 mail.Source
+		want                   map[string]api.ProbeCheck
+		wantOrder              []string
+		wantCalls              []string
+		wantStatus             string
+		wantReadStatePreserved *bool
 	}{
 		{
 			name:    "capability failure skips dependent checks",
@@ -214,6 +215,83 @@ func TestRunnerRunIMAPChecklistMatrix(t *testing.T) {
 			},
 		},
 		{
+			name:    "read state preview preserves seen state",
+			account: fullAccount("INBOX"),
+			source: probeAdapter(map[string][]mailfake.Message{
+				"INBOX": {
+					{UID: 10, VisibleByPolicy: true, Body: "fixture body", MarksSeenOnPreview: false},
+					{UID: 20, VisibleByPolicy: true, Body: "fixture body"},
+				},
+			}),
+			wantStatus: api.ProbeStatusPassed,
+			want: map[string]api.ProbeCheck{
+				"read_state": {Status: api.ProbeStatusPassed, Code: "body_peek_ok"},
+			},
+			wantCalls:              []string{"capability", "folders", "select", "list", "list", "list", "preview"},
+			wantReadStatePreserved: boolPtr(true),
+		},
+		{
+			name:    "read state preview marks seen",
+			account: fullAccount("INBOX"),
+			source: probeAdapter(map[string][]mailfake.Message{
+				"INBOX": {
+					{UID: 10, VisibleByPolicy: true, Body: "fixture body", MarksSeenOnPreview: true},
+					{UID: 20, VisibleByPolicy: true, Body: "fixture body"},
+				},
+			}),
+			wantStatus: api.ProbeStatusFailed,
+			want: map[string]api.ProbeCheck{
+				"read_state": {Status: api.ProbeStatusFailed, Code: "body_marked_seen"},
+			},
+			wantCalls:              []string{"capability", "folders", "select", "list", "list", "list", "preview"},
+			wantReadStatePreserved: boolPtr(false),
+		},
+		{
+			name:    "read state skips already seen fixture",
+			account: fullAccount("INBOX"),
+			source: probeAdapter(map[string][]mailfake.Message{
+				"INBOX": {
+					{UID: 10, VisibleByPolicy: true, Body: "fixture body", Seen: true},
+					{UID: 20, VisibleByPolicy: true, Body: "fixture body"},
+				},
+			}),
+			wantStatus: api.ProbeStatusPassed,
+			want: map[string]api.ProbeCheck{
+				"read_state": {Status: api.ProbeStatusPassed, Code: "body_peek_ok"},
+			},
+			wantCalls:              []string{"capability", "folders", "select", "list", "list", "list", "preview", "preview"},
+			wantReadStatePreserved: boolPtr(true),
+		},
+		{
+			name:    "read state requires an unseen fixture",
+			account: fullAccount("INBOX"),
+			source: probeAdapter(map[string][]mailfake.Message{
+				"INBOX": {
+					{UID: 10, VisibleByPolicy: true, Body: "fixture body", Seen: true},
+					{UID: 20, VisibleByPolicy: true, Body: "fixture body", Seen: true},
+				},
+			}),
+			wantStatus: api.ProbeStatusInconclusive,
+			want: map[string]api.ProbeCheck{
+				"read_state": {Status: api.ProbeStatusInconclusive, Code: "fixture_required", Detail: "BODY.PEEK read-state fixture is required"},
+			},
+			wantCalls: []string{"capability", "folders", "select", "list", "list", "list", "preview", "preview"},
+		},
+		{
+			name:    "read state unobserved fixture is inconclusive",
+			account: fullAccount("INBOX"),
+			source: unobservedReadStateSource{Source: probeAdapter(map[string][]mailfake.Message{
+				"INBOX": {
+					{UID: 10, VisibleByPolicy: true, Body: "fixture body"},
+					{UID: 20, VisibleByPolicy: true, Body: "fixture body"},
+				},
+			})},
+			wantStatus: api.ProbeStatusInconclusive,
+			want: map[string]api.ProbeCheck{
+				"read_state": {Status: api.ProbeStatusInconclusive, Code: "fixture_required", Detail: "BODY.PEEK read-state fixture is required"},
+			},
+		},
+		{
 			name:       "read state preview errors are sanitized",
 			account:    fullAccount("INBOX"),
 			source:     probeAdapter(map[string][]mailfake.Message{"INBOX": {{UID: 10, VisibleByPolicy: true}, {UID: 20, VisibleByPolicy: true}}}, sourceFailure{method: "preview", account: "rs_info", folder: "INBOX", err: errors.New("FETCH leaked subject pw private text")}),
@@ -238,6 +316,14 @@ func TestRunnerRunIMAPChecklistMatrix(t *testing.T) {
 				gotCheck := checkByID(t, got, id)
 				if gotCheck.Status != want.Status || gotCheck.Code != want.Code {
 					t.Fatalf("%s = %+v, want status=%q code=%q", id, gotCheck, want.Status, want.Code)
+				}
+				if id == "read_state" && tc.wantReadStatePreserved != nil {
+					if gotCheck.Facts == nil || gotCheck.Facts.ReadStatePreserved == nil {
+						t.Fatalf("%s facts = %+v, want read_state_preserved=%t", id, gotCheck.Facts, *tc.wantReadStatePreserved)
+					}
+					if *gotCheck.Facts.ReadStatePreserved != *tc.wantReadStatePreserved {
+						t.Fatalf("%s read_state_preserved = %t, want %t", id, *gotCheck.Facts.ReadStatePreserved, *tc.wantReadStatePreserved)
+					}
 				}
 				if want.Detail != "" && gotCheck.Detail != want.Detail {
 					t.Fatalf("%s detail = %q, want %q", id, gotCheck.Detail, want.Detail)
@@ -377,6 +463,14 @@ func (s rangeIgnoringSource) ListUIDs(ctx context.Context, acct config.Account, 
 	return s.Source.ListUIDs(ctx, acct, folder, mail.UIDRange{})
 }
 
+type unobservedReadStateSource struct {
+	mail.Source
+}
+
+func (s unobservedReadStateSource) FetchBodyPreviewAndSeenState(context.Context, config.Account, string, mail.UID, int) (string, mail.ReadStateProbeResult, error) {
+	return "", mail.ReadStateProbeResult{}, nil
+}
+
 func checkByID(t *testing.T, probe api.ProbeIMAPResponse, id string) api.ProbeCheck {
 	t.Helper()
 	for _, check := range probe.Checks {
@@ -456,4 +550,8 @@ func stringSlicesEqual(got, want []string) bool {
 		}
 	}
 	return true
+}
+
+func boolPtr(v bool) *bool {
+	return &v
 }

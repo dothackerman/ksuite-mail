@@ -94,6 +94,10 @@ func (unavailableSource) FetchBodyPreview(context.Context, config.Account, strin
 	return "", mail.ErrSourceUnavailable
 }
 
+func (unavailableSource) FetchBodyPreviewAndSeenState(context.Context, config.Account, string, mail.UID, int) (string, mail.ReadStateProbeResult, error) {
+	return "", mail.ReadStateProbeResult{}, mail.ErrSourceUnavailable
+}
+
 // Options configures the daemon's view of the deployment.
 type Options struct {
 	ConfigPath         string
