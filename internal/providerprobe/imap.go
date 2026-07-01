@@ -48,7 +48,7 @@ func (Runner) RunIMAP(ctx context.Context, src mail.Source, acct config.Account)
 			probeCheck(checkFolderListing, api.ProbeStatusFailed, "source_unavailable", "mail source is unavailable"),
 			probeCheck(checkFolderSelection, api.ProbeStatusFailed, "source_unavailable", "mail source is unavailable"),
 			probeCheck(checkUIDBehavior, api.ProbeStatusFailed, "source_unavailable", "mail source is unavailable"),
-			inconclusiveRefreshStrategy("prerequisite_failed", "refresh strategy requires a live source"),
+			inconclusiveRefreshStrategy(nil, "prerequisite_failed", "refresh strategy requires a live source"),
 			domainProbeNotRun(acct),
 			probeCheck(checkReadState, api.ProbeStatusInconclusive, "fixture_required", "BODY.PEEK read-state fixture is required"),
 		)
@@ -62,7 +62,7 @@ func (Runner) RunIMAP(ctx context.Context, src mail.Source, acct config.Account)
 			probeNotRun(checkFolderListing),
 			probeNotRun(checkFolderSelection),
 			probeNotRun(checkUIDBehavior),
-			inconclusiveRefreshStrategy("prerequisite_failed", "refresh strategy requires prerequisite checks"),
+			inconclusiveRefreshStrategy(nil, "prerequisite_failed", "refresh strategy requires prerequisite checks"),
 			domainProbeNotRun(acct),
 			probeNotRun(checkReadState),
 		)
@@ -76,7 +76,7 @@ func (Runner) RunIMAP(ctx context.Context, src mail.Source, acct config.Account)
 		checks = append(checks,
 			probeNotRun(checkFolderSelection),
 			probeNotRun(checkUIDBehavior),
-			inconclusiveRefreshStrategy("prerequisite_failed", "refresh strategy requires prerequisite checks"),
+			inconclusiveRefreshStrategy(caps, "prerequisite_failed", "refresh strategy requires prerequisite checks"),
 			domainProbeNotRun(acct),
 			probeNotRun(checkReadState),
 		)
@@ -87,7 +87,7 @@ func (Runner) RunIMAP(ctx context.Context, src mail.Source, acct config.Account)
 			probeCheck(checkFolderListing, api.ProbeStatusInconclusive, "fixture_required", "folder_count=0"),
 			probeNotRun(checkFolderSelection),
 			probeNotRun(checkUIDBehavior),
-			inconclusiveRefreshStrategy("prerequisite_failed", "refresh strategy requires prerequisite checks"),
+			inconclusiveRefreshStrategy(caps, "prerequisite_failed", "refresh strategy requires prerequisite checks"),
 			domainProbeNotRun(acct),
 			probeNotRun(checkReadState),
 		)
@@ -103,7 +103,7 @@ func (Runner) RunIMAP(ctx context.Context, src mail.Source, acct config.Account)
 		checks = append(checks,
 			probeCheck(checkFolderSelection, api.ProbeStatusInconclusive, "no_configured_folder", "selected account has no configured folders"),
 			probeCheck(checkUIDBehavior, api.ProbeStatusInconclusive, "no_configured_folder", "selected account has no configured folders"),
-			inconclusiveRefreshStrategy("no_configured_folder", "refresh strategy requires a configured folder"),
+			inconclusiveRefreshStrategy(caps, "no_configured_folder", "refresh strategy requires a configured folder"),
 			domainProbeNotRun(acct),
 			probeCheck(checkReadState, api.ProbeStatusInconclusive, "no_configured_folder", "selected account has no configured folders"),
 		)
@@ -113,7 +113,7 @@ func (Runner) RunIMAP(ctx context.Context, src mail.Source, acct config.Account)
 			checks = append(checks, probeFailure(checkFolderSelection, err))
 			checks = append(checks,
 				probeNotRun(checkUIDBehavior),
-				inconclusiveRefreshStrategy("prerequisite_failed", "refresh strategy requires folder selection"),
+				inconclusiveRefreshStrategy(caps, "prerequisite_failed", "refresh strategy requires folder selection"),
 				domainProbeNotRun(acct),
 				probeNotRun(checkReadState),
 			)
@@ -169,7 +169,7 @@ func probeUIDBehavior(ctx context.Context, src mail.Source, acct config.Account,
 }
 
 func checkRefreshStrategy(caps []string, state *mail.RemoteFolderState, uidBehavior api.ProbeCheck) api.ProbeCheck {
-	condstoreSupported := boolPtr(hasCapability(caps, "CONDSTORE"))
+	condstoreSupported := boolPtr(supportsCondstore(caps))
 	facts := &api.ProbeFacts{
 		CondstoreSupported: condstoreSupported,
 		UIDRangeSupported:  uidRangeSupported(uidBehavior),
@@ -198,10 +198,14 @@ func checkRefreshStrategy(caps []string, state *mail.RemoteFolderState, uidBehav
 	return probeCheckFacts(checkRefreshStrategyID, api.ProbeStatusInconclusive, "strategy_inconclusive", "missing fixture evidence for strategy selection", facts)
 }
 
-func inconclusiveRefreshStrategy(code, detail string) api.ProbeCheck {
-	return probeCheckFacts(checkRefreshStrategyID, api.ProbeStatusInconclusive, code, detail, &api.ProbeFacts{
+func inconclusiveRefreshStrategy(caps []string, code, detail string) api.ProbeCheck {
+	facts := &api.ProbeFacts{
 		RefreshStrategy: "inconclusive",
-	})
+	}
+	if caps != nil {
+		facts.CondstoreSupported = boolPtr(supportsCondstore(caps))
+	}
+	return probeCheckFacts(checkRefreshStrategyID, api.ProbeStatusInconclusive, code, detail, facts)
 }
 
 func uidRangeSupported(check api.ProbeCheck) *bool {
@@ -221,6 +225,10 @@ func hasCapability(caps []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func supportsCondstore(caps []string) bool {
+	return hasCapability(caps, "CONDSTORE") || hasCapability(caps, "QRESYNC")
 }
 
 func probeDomainHeaders(ctx context.Context, src mail.Source, acct config.Account, folder string) api.ProbeCheck {
