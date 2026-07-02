@@ -87,6 +87,10 @@ func TestProbeFactsUseTypedSafeJSONFields(t *testing.T) {
 			UIDVALIDITY:            &uidvalidity,
 			UIDNEXT:                &uidnext,
 			HighestModSeq:          &hms,
+			DomainHeaderSearch: []api.DomainHeaderSearch{
+				{Domain: "example.org", Header: "From", MatchedUIDCount: 1, NonmatchingVisible: false},
+				{Domain: "example.org", Header: "Bcc", MatchedUIDCount: 2, NonmatchingVisible: true},
+			},
 		},
 	}
 
@@ -108,6 +112,11 @@ func TestProbeFactsUseTypedSafeJSONFields(t *testing.T) {
 		`"uidvalidity":777`,
 		`"uidnext":21`,
 		`"highestmodseq":42`,
+		`"domain_header_search"`,
+		`"domain":"example.org"`,
+		`"header":"Bcc"`,
+		`"matched_uid_count":2`,
+		`"nonmatching_visible":true`,
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("probe facts JSON missing %s in %s", want, got)
