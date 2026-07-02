@@ -252,6 +252,54 @@ func TestFetchBodyPreviewAndSeenStateFetchesPostPeekFlagsSeparately(t *testing.T
 	}
 }
 
+func TestFetchBodyPreviewUsesSingleBodyPeekFetch(t *testing.T) {
+	ln, roots, commands := newBodyPeekTLSServer(t)
+	defer func() { _ = ln.Close() }()
+
+	host, portText, err := net.SplitHostPort(ln.Addr().String())
+	if err != nil {
+		t.Fatalf("split listener address: %v", err)
+	}
+	var port int
+	if _, err := fmt.Sscanf(portText, "%d", &port); err != nil {
+		t.Fatalf("parse port %q: %v", portText, err)
+	}
+	acct := testAccount(t)
+	acct.Host = host
+	acct.Port = port
+
+	src := &Source{
+		secretsPath: writeTestSecrets(t),
+		timeout:     time.Second,
+		tlsConfig:   &tls.Config{RootCAs: roots},
+	}
+
+	preview, err := src.FetchBodyPreview(context.Background(), acct, "INBOX", 10, 1)
+	if err != nil {
+		t.Fatalf("FetchBodyPreview: %v", err)
+	}
+	if preview != "x" {
+		t.Fatalf("preview = %q, want x", preview)
+	}
+
+	var gotCommands []string
+	for cmd := range commands {
+		gotCommands = append(gotCommands, cmd)
+	}
+	var uidFetches []string
+	for _, cmd := range gotCommands {
+		if strings.Contains(cmd, "UID FETCH") {
+			uidFetches = append(uidFetches, cmd)
+		}
+	}
+	if len(uidFetches) != 1 {
+		t.Fatalf("UID FETCH commands = %#v, want one body peek", uidFetches)
+	}
+	if !strings.Contains(uidFetches[0], "BODY.PEEK") || strings.Contains(uidFetches[0], "FLAGS") {
+		t.Fatalf("body command = %q, want BODY.PEEK without FLAGS", uidFetches[0])
+	}
+}
+
 func testAccount(t *testing.T) config.Account {
 	t.Helper()
 	tlsEnabled := true
@@ -488,7 +536,7 @@ func newBodyPeekTLSServer(t *testing.T) (net.Listener, *x509.CertPool, <-chan st
 		r := bufio.NewReader(conn)
 		w := bufio.NewWriter(conn)
 		writeIMAPLine(w, "* OK ready")
-		fetchCount := 0
+		flagsFetchCount := 0
 		for {
 			line, err := r.ReadString('\n')
 			if err != nil {
@@ -509,17 +557,18 @@ func newBodyPeekTLSServer(t *testing.T) (net.Listener, *x509.CertPool, <-chan st
 				writeIMAPLine(w, "* 1 EXISTS")
 				writeIMAPLine(w, tag+" OK [READ-ONLY] EXAMINE completed")
 			case "UID":
-				fetchCount++
-				switch fetchCount {
-				case 1:
-					writeIMAPLine(w, "* 1 FETCH (UID 10 FLAGS ())")
-				case 2:
+				if strings.Contains(strings.ToUpper(line), "BODY") {
 					_, _ = w.WriteString("* 1 FETCH (UID 10 BODY[TEXT]<0> {1}\r\nx)\r\n")
 					_ = w.Flush()
-				case 3:
-					writeIMAPLine(w, "* 1 FETCH (UID 10 FLAGS (\\Seen))")
-				default:
-					writeIMAPLine(w, tag+" BAD unexpected fetch")
+				} else if strings.Contains(strings.ToUpper(line), "FLAGS") {
+					flagsFetchCount++
+					if flagsFetchCount == 1 {
+						writeIMAPLine(w, "* 1 FETCH (UID 10 FLAGS ())")
+					} else {
+						writeIMAPLine(w, "* 1 FETCH (UID 10 FLAGS (\\Seen))")
+					}
+				} else {
+					writeIMAPLine(w, tag+" BAD unsupported fetch")
 					continue
 				}
 				writeIMAPLine(w, tag+" OK FETCH completed")

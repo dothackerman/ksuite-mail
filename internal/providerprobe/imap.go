@@ -212,7 +212,13 @@ func probeReadState(ctx context.Context, src mail.Source, acct config.Account, f
 	var seenState mail.ReadStateProbeResult
 	foundFixture := false
 	for _, uid := range uids {
-		var err error
+		observed, seenBefore, err := src.FetchSeenState(ctx, acct, folder, uid)
+		if err != nil {
+			return probeFailure(checkReadState, err)
+		}
+		if !observed || seenBefore {
+			continue
+		}
 		_, seenState, err = src.FetchBodyPreviewAndSeenState(ctx, acct, folder, uid, 1)
 		if err != nil {
 			return probeFailure(checkReadState, err)

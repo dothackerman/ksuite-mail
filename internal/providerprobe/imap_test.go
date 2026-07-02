@@ -227,7 +227,7 @@ func TestRunnerRunIMAPChecklistMatrix(t *testing.T) {
 			want: map[string]api.ProbeCheck{
 				"read_state": {Status: api.ProbeStatusPassed, Code: "body_peek_ok"},
 			},
-			wantCalls:              []string{"capability", "folders", "select", "list", "list", "list", "preview"},
+			wantCalls:              []string{"capability", "folders", "select", "list", "list", "list", "seen", "seen", "preview"},
 			wantReadStatePreserved: boolPtr(true),
 		},
 		{
@@ -243,7 +243,7 @@ func TestRunnerRunIMAPChecklistMatrix(t *testing.T) {
 			want: map[string]api.ProbeCheck{
 				"read_state": {Status: api.ProbeStatusFailed, Code: "body_marked_seen"},
 			},
-			wantCalls:              []string{"capability", "folders", "select", "list", "list", "list", "preview"},
+			wantCalls:              []string{"capability", "folders", "select", "list", "list", "list", "seen", "seen", "preview"},
 			wantReadStatePreserved: boolPtr(false),
 		},
 		{
@@ -259,7 +259,7 @@ func TestRunnerRunIMAPChecklistMatrix(t *testing.T) {
 			want: map[string]api.ProbeCheck{
 				"read_state": {Status: api.ProbeStatusPassed, Code: "body_peek_ok"},
 			},
-			wantCalls:              []string{"capability", "folders", "select", "list", "list", "list", "preview", "preview"},
+			wantCalls:              []string{"capability", "folders", "select", "list", "list", "list", "seen", "seen", "seen", "preview"},
 			wantReadStatePreserved: boolPtr(true),
 		},
 		{
@@ -275,7 +275,7 @@ func TestRunnerRunIMAPChecklistMatrix(t *testing.T) {
 			want: map[string]api.ProbeCheck{
 				"read_state": {Status: api.ProbeStatusInconclusive, Code: "fixture_required", Detail: "BODY.PEEK read-state fixture is required"},
 			},
-			wantCalls: []string{"capability", "folders", "select", "list", "list", "list", "preview", "preview"},
+			wantCalls: []string{"capability", "folders", "select", "list", "list", "list", "seen", "seen"},
 		},
 		{
 			name:    "read state unobserved fixture is inconclusive",
@@ -465,6 +465,10 @@ func (s rangeIgnoringSource) ListUIDs(ctx context.Context, acct config.Account, 
 
 type unobservedReadStateSource struct {
 	mail.Source
+}
+
+func (s unobservedReadStateSource) FetchSeenState(context.Context, config.Account, string, mail.UID) (bool, bool, error) {
+	return true, false, nil
 }
 
 func (s unobservedReadStateSource) FetchBodyPreviewAndSeenState(context.Context, config.Account, string, mail.UID, int) (string, mail.ReadStateProbeResult, error) {

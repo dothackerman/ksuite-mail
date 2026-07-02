@@ -180,6 +180,10 @@ func (timeoutProbeSource) FetchEnvelopes(context.Context, config.Account, string
 	return nil, errors.New("unexpected fetch")
 }
 
+func (timeoutProbeSource) FetchSeenState(context.Context, config.Account, string, mail.UID) (bool, bool, error) {
+	return false, false, errors.New("unexpected seen")
+}
+
 func (timeoutProbeSource) FetchBodyPreview(context.Context, config.Account, string, mail.UID, int) (string, error) {
 	return "", errors.New("unexpected preview")
 }
