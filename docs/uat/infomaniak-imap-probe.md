@@ -91,6 +91,15 @@ Expected behavior:
 - `UIDVALIDITY` and `UIDNEXT` appear as structured folder-state facts, not only as prose details.
 - The probe reports UID range search behavior using safe counts and booleans.
 - The probe reports `CONDSTORE` / `HIGHESTMODSEQ` support when available.
+- The probe emits a `refresh_strategy` check with a machine-readable `refresh_strategy` fact:
+  - `modseq` when `CONDSTORE` and `HIGHESTMODSEQ` indicate MODSEQ is available.
+  - `uid_range` when UID range search works and MODSEQ is unavailable.
+  - `inconclusive` when folder selection or fixtures are incomplete.
+  - `unsupported` only when UID-range evidence proves unsupported and MODSEQ is unavailable.
+- The `refresh_strategy` facts include:
+  - `condstore_supported`
+  - `highestmodseq_available`
+  - `uid_range_supported`
 
 Outcome:
 
