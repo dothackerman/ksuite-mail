@@ -106,6 +106,7 @@ Expected behavior:
 - The probe checks `UID SEARCH HEADER Cc <domain>`.
 - The probe checks `UID SEARCH HEADER Bcc <domain>` when available.
 - Matching behavior is reported through safe counts, booleans, and `inconclusive` where fixtures are missing.
+- The check reports per-slice facts as `facts.domain_header_search` entries with `domain`, `header`, `matched_uid_count`, and `nonmatching_visible` fields.
 - For `policy = "full"` accounts, domain-header checks are reported as `not_applicable`.
 - The non-matching fixture remains invisible.
 
