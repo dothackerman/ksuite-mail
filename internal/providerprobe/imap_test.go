@@ -480,6 +480,93 @@ func TestRunnerRunIMAPDomainReadStateUsesOnlySameFolderValidatedHeaders(t *testi
 	}
 }
 
+func TestRunnerRunIMAPDomainReadStateAllowsSafeSameFolderFixtureWhenSentBccMissing(t *testing.T) {
+	source := probeAdapter(map[string][]mailfake.Message{
+		"INBOX": {
+			{UID: 19, VisibleByPolicy: true, Body: "second fixture"},
+			{UID: 20, VisibleByPolicy: true, Body: "allowed fixture"},
+		},
+	})
+	for _, header := range []string{"From", "To", "Cc"} {
+		source.SetSearchResult("rs_info", "INBOX", header, "regenerativ.ch", []mail.UID{20})
+		source.SetSearchResult("rs_info", "INBOX", header, "ksuite-mail-probe.invalid", nil)
+	}
+
+	got := providerprobe.Runner{}.RunIMAP(context.Background(), source, config.Account{
+		ID:      "rs_info",
+		Policy:  config.PolicyDomain,
+		Domains: []string{"regenerativ.ch"},
+		Folders: []string{"INBOX"},
+	})
+
+	domainCheck := checkByID(t, got, "domain_header_search")
+	if domainCheck.Status != api.ProbeStatusInconclusive || domainCheck.Code != "fixture_required" {
+		t.Fatalf("domain_header_search = %+v, want inconclusive fixture_required for missing Sent/Bcc", domainCheck)
+	}
+	readState := checkByID(t, got, "read_state")
+	if readState.Status != api.ProbeStatusPassed || readState.Code != "body_peek_ok" {
+		t.Fatalf("read_state = %+v, want passed body_peek_ok from safe same-folder fixture", readState)
+	}
+	if readState.Facts == nil || readState.Facts.ReadStatePreserved == nil || !*readState.Facts.ReadStatePreserved {
+		t.Fatalf("read_state facts = %+v, want read_state_preserved=true", readState.Facts)
+	}
+	calls := source.CallsSnapshot()
+	for _, call := range calls {
+		if call.Method == "preview" && call.Payload != "uid=20" {
+			t.Fatalf("domain read-state previewed %q, want validated uid=20 only; calls=%+v", call.Payload, calls)
+		}
+	}
+}
+
+func TestRunnerRunIMAPDomainReadStateDoesNotReSearchBeforePreview(t *testing.T) {
+	source := probeAdapter(map[string][]mailfake.Message{
+		"INBOX": {
+			{UID: 20, VisibleByPolicy: true, Body: "allowed fixture", Seen: true},
+			{UID: 21, VisibleByPolicy: true, Body: "unvalidated fixture"},
+		},
+		"Sent": {
+			{UID: 30, VisibleByPolicy: true, Body: "sent bcc fixture"},
+		},
+	})
+	for _, header := range []string{"From", "To", "Cc"} {
+		source.SetSearchResult("rs_info", "INBOX", header, "regenerativ.ch", []mail.UID{20})
+		source.SetSearchResult("rs_info", "INBOX", header, "ksuite-mail-probe.invalid", nil)
+	}
+	source.SetSearchResult("rs_info", "Sent", "Bcc", "regenerativ.ch", []mail.UID{30})
+	source.SetSearchResult("rs_info", "Sent", "Bcc", "ksuite-mail-probe.invalid", nil)
+
+	got := providerprobe.Runner{}.RunIMAP(context.Background(), source, config.Account{
+		ID:      "rs_info",
+		Policy:  config.PolicyDomain,
+		Domains: []string{"regenerativ.ch"},
+		Folders: []string{"INBOX", "Sent"},
+	})
+
+	readState := checkByID(t, got, "read_state")
+	if readState.Status != api.ProbeStatusInconclusive || readState.Code != "fixture_required" {
+		t.Fatalf("read_state = %+v, want inconclusive fixture_required after only validated uid is already seen", readState)
+	}
+	calls := source.CallsSnapshot()
+	searchesBeforeReadState := 0
+	for _, call := range calls {
+		switch call.Method {
+		case "search":
+			searchesBeforeReadState++
+		case "seen":
+			if searchesBeforeReadState != 8 {
+				t.Fatalf("read_state performed extra search before seen check; search count before first seen = %d calls=%+v", searchesBeforeReadState, calls)
+			}
+			if call.Payload != "uid=20" {
+				t.Fatalf("domain read-state inspected %q, want validated uid=20 only; calls=%+v", call.Payload, calls)
+			}
+			return
+		case "preview":
+			t.Fatalf("domain read-state previewed unvalidated UID: calls=%+v", calls)
+		}
+	}
+	t.Fatalf("read_state did not inspect validated evidence; calls=%+v", calls)
+}
+
 func TestRunnerRunIMAPReportsStructuredFolderStateFacts(t *testing.T) {
 	source := probeAdapter(map[string][]mailfake.Message{
 		"INBOX": {{UID: 10, VisibleByPolicy: true, Body: "fixture body"}, {UID: 20, VisibleByPolicy: true}},
