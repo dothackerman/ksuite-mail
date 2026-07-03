@@ -166,7 +166,11 @@ func (s *Source) FetchBodyPreview(ctx context.Context, acct config.Account, fold
 		return "", normalizeCommandError(err)
 	}
 
-	return c.fetchBodyPreview(uid, maxBytes)
+	preview, err := c.fetchBodyPreview(uid, maxBytes)
+	if err != nil {
+		return "", normalizeCommandError(err)
+	}
+	return preview, nil
 }
 
 // FetchBodyPreviewAndSeenState returns a bounded body preview with observed
@@ -221,7 +225,11 @@ func (s *Source) FetchSeenState(ctx context.Context, acct config.Account, folder
 		return false, false, normalizeCommandError(err)
 	}
 
-	return c.fetchSeenState(uid)
+	observed, seen, err := c.fetchSeenState(uid)
+	if err != nil {
+		return false, false, normalizeCommandError(err)
+	}
+	return observed, seen, nil
 }
 
 func (c liveConn) fetchSeenState(uid mail.UID) (bool, bool, error) {

@@ -300,6 +300,62 @@ func TestFetchBodyPreviewUsesSingleBodyPeekFetch(t *testing.T) {
 	}
 }
 
+func TestFetchBodyPreviewNormalizesUIDFetchTimeout(t *testing.T) {
+	ln, roots := newUIDFetchHangingTLSServer(t)
+	defer func() { _ = ln.Close() }()
+
+	host, portText, err := net.SplitHostPort(ln.Addr().String())
+	if err != nil {
+		t.Fatalf("split listener address: %v", err)
+	}
+	var port int
+	if _, err := fmt.Sscanf(portText, "%d", &port); err != nil {
+		t.Fatalf("parse port %q: %v", portText, err)
+	}
+	acct := testAccount(t)
+	acct.Host = host
+	acct.Port = port
+
+	src := &Source{
+		secretsPath: writeTestSecrets(t),
+		timeout:     50 * time.Millisecond,
+		tlsConfig:   &tls.Config{RootCAs: roots},
+	}
+
+	_, err = src.FetchBodyPreview(context.Background(), acct, "INBOX", 10, 1)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("FetchBodyPreview error = %v, want DeadlineExceeded", err)
+	}
+}
+
+func TestFetchSeenStateNormalizesUIDFetchTimeout(t *testing.T) {
+	ln, roots := newUIDFetchHangingTLSServer(t)
+	defer func() { _ = ln.Close() }()
+
+	host, portText, err := net.SplitHostPort(ln.Addr().String())
+	if err != nil {
+		t.Fatalf("split listener address: %v", err)
+	}
+	var port int
+	if _, err := fmt.Sscanf(portText, "%d", &port); err != nil {
+		t.Fatalf("parse port %q: %v", portText, err)
+	}
+	acct := testAccount(t)
+	acct.Host = host
+	acct.Port = port
+
+	src := &Source{
+		secretsPath: writeTestSecrets(t),
+		timeout:     50 * time.Millisecond,
+		tlsConfig:   &tls.Config{RootCAs: roots},
+	}
+
+	_, _, err = src.FetchSeenState(context.Background(), acct, "INBOX", 10)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("FetchSeenState error = %v, want DeadlineExceeded", err)
+	}
+}
+
 func testAccount(t *testing.T) config.Account {
 	t.Helper()
 	tlsEnabled := true
@@ -582,6 +638,58 @@ func newBodyPeekTLSServer(t *testing.T) (net.Listener, *x509.CertPool, <-chan st
 		}
 	}()
 	return ln, roots, commands
+}
+
+func newUIDFetchHangingTLSServer(t *testing.T) (net.Listener, *x509.CertPool) {
+	t.Helper()
+	cert, roots := testCertificate(t)
+	base, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		if errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.EACCES) || strings.Contains(err.Error(), "operation not permitted") {
+			t.Skipf("TCP listener denied by environment: %v", err)
+		}
+		t.Fatalf("listen tcp: %v", err)
+	}
+	ln := tls.NewListener(base, &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12})
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		r := bufio.NewReader(conn)
+		w := bufio.NewWriter(conn)
+		writeIMAPLine(w, "* OK ready")
+		for {
+			line, err := r.ReadString('\n')
+			if err != nil {
+				return
+			}
+			fields := strings.Fields(strings.TrimRight(line, "\r\n"))
+			if len(fields) < 2 {
+				continue
+			}
+			tag := fields[0]
+			switch strings.ToUpper(fields[1]) {
+			case "LOGIN":
+				writeIMAPLine(w, tag+" OK LOGIN completed")
+			case "EXAMINE":
+				writeIMAPLine(w, "* FLAGS (\\Seen)")
+				writeIMAPLine(w, "* 1 EXISTS")
+				writeIMAPLine(w, tag+" OK [READ-ONLY] EXAMINE completed")
+			case "UID":
+				time.Sleep(2 * time.Second)
+				return
+			case "LOGOUT":
+				writeIMAPLine(w, "* BYE closing")
+				writeIMAPLine(w, tag+" OK LOGOUT completed")
+				return
+			default:
+				writeIMAPLine(w, tag+" BAD unsupported")
+			}
+		}
+	}()
+	return ln, roots
 }
 
 func writeIMAPLine(w *bufio.Writer, line string) {
