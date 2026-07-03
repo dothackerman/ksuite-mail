@@ -1095,6 +1095,43 @@ func TestRunnerRunIMAPReportsSentBccAvailabilityFacts(t *testing.T) {
 	assertNoRawProviderLeak(t, got)
 }
 
+func TestRunnerRunIMAPSentBccAvailabilityIgnoresNonSentSubstringFolders(t *testing.T) {
+	source := probeAdapter(map[string][]mailfake.Message{
+		"INBOX":         {{UID: 10, VisibleByPolicy: true}, {UID: 20, VisibleByPolicy: true}},
+		"Presentations": {{UID: 25, VisibleByPolicy: true}},
+		"Sent":          {{UID: 30, VisibleByPolicy: true, Body: "private sent body"}},
+	})
+	for _, header := range []string{"From", "To", "Cc"} {
+		source.SetSearchResult("rs_info", "INBOX", header, "regenerativ.ch", []mail.UID{10})
+		source.SetSearchResult("rs_info", "INBOX", header, "ksuite-mail-probe.invalid", nil)
+	}
+	source.SetSearchResult("rs_info", "Presentations", "Bcc", "regenerativ.ch", []mail.UID{25})
+	source.SetSearchResult("rs_info", "Presentations", "Bcc", "ksuite-mail-probe.invalid", nil)
+	source.SetSearchResult("rs_info", "Sent", "Bcc", "regenerativ.ch", []mail.UID{30})
+	source.SetSearchResult("rs_info", "Sent", "Bcc", "ksuite-mail-probe.invalid", nil)
+
+	got := providerprobe.Runner{}.RunIMAP(context.Background(), source, config.Account{
+		ID:      "rs_info",
+		Policy:  config.PolicyDomain,
+		Domains: []string{"regenerativ.ch"},
+		Folders: []string{"INBOX"},
+	})
+
+	check := checkByID(t, got, "sent_bcc_availability")
+	if check.Status != api.ProbeStatusPassed || check.Code != "sent_bcc_available" {
+		t.Fatalf("sent_bcc_availability = %+v, want passed sent_bcc_available", check)
+	}
+	facts := check.Facts.SentBccAvailability
+	if facts.SentFolder != "Sent" || facts.SentFolderSource != "folder_listing" {
+		t.Fatalf("sent folder facts = %+v, want Sent from folder listing", facts)
+	}
+	for _, call := range source.CallsSnapshot() {
+		if call.Method == "search" && call.Target == "rs_info@Presentations" && call.Payload == "bcc:regenerativ.ch" {
+			t.Fatalf("sent bcc availability searched non-sent substring folder: calls=%+v", source.CallsSnapshot())
+		}
+	}
+}
+
 func TestRunnerRunIMAPReportsMissingSentFolderForBccAvailability(t *testing.T) {
 	source := probeAdapter(map[string][]mailfake.Message{
 		"INBOX": {{UID: 10, VisibleByPolicy: true}, {UID: 20, VisibleByPolicy: true}},
@@ -1152,8 +1189,8 @@ func TestRunnerRunIMAPReportsMissingBccFixtureAsInconclusive(t *testing.T) {
 		t.Fatalf("sent_bcc_availability = %+v, want inconclusive bcc_fixture_required", check)
 	}
 	facts := check.Facts.SentBccAvailability
-	if facts.BccAvailable == nil || *facts.BccAvailable {
-		t.Fatalf("bcc available = %+v, want false", facts.BccAvailable)
+	if facts.BccAvailable != nil {
+		t.Fatalf("bcc available should be omitted for inconclusive fixture coverage: %+v", facts.BccAvailable)
 	}
 	if facts.MatchedUIDCount != 0 || facts.NonmatchingVisible {
 		t.Fatalf("unexpected missing bcc facts: %+v", facts)
@@ -1186,8 +1223,8 @@ func TestRunnerRunIMAPSentBccAvailabilityChecksAllConfiguredDomains(t *testing.T
 		t.Fatalf("sent_bcc_availability = %+v, want inconclusive bcc_fixture_required", check)
 	}
 	facts := check.Facts.SentBccAvailability
-	if facts.BccAvailable == nil || !*facts.BccAvailable {
-		t.Fatalf("bcc available = %+v, want true from partial positive evidence", facts.BccAvailable)
+	if facts.BccAvailable != nil {
+		t.Fatalf("bcc available should be omitted for inconclusive fixture coverage: %+v", facts.BccAvailable)
 	}
 	if facts.MatchedUIDCount != 1 {
 		t.Fatalf("matched uid count = %d, want 1", facts.MatchedUIDCount)

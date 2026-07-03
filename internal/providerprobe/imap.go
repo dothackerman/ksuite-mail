@@ -387,12 +387,11 @@ func probeSentBccAvailability(ctx context.Context, src mail.Source, acct config.
 		}
 	}
 
-	available := matchedUIDCount > 0
-	facts.SentBccAvailability.BccAvailable = boolPtr(available)
 	facts.SentBccAvailability.MatchedUIDCount = matchedUIDCount
 	if missingFixture {
 		return probeCheckFacts(checkSentBcc, api.ProbeStatusInconclusive, "bcc_fixture_required", "sent_bcc_count="+strconv.Itoa(matchedUIDCount), facts)
 	}
+	facts.SentBccAvailability.BccAvailable = boolPtr(matchedUIDCount > 0)
 	return probeCheckFacts(checkSentBcc, api.ProbeStatusPassed, "sent_bcc_available", "sent_bcc_count="+strconv.Itoa(matchedUIDCount), facts)
 }
 
@@ -516,7 +515,7 @@ func sentProbeFolderForListing(acct config.Account, folders []string) (string, s
 	if folder := sentProbeFolderFromList(acct.Folders); folder != "" {
 		return folder, "configured_folder"
 	}
-	if folder := sentProbeFolderFromList(folders); folder != "" {
+	if folder := sentProbeFolderFromProviderList(folders); folder != "" {
 		return folder, "folder_listing"
 	}
 	return "", ""
@@ -533,6 +532,35 @@ func sentProbeFolderFromList(folders []string) string {
 		}
 	}
 	return ""
+}
+
+func sentProbeFolderFromProviderList(folders []string) string {
+	for _, folder := range folders {
+		clean := strings.TrimSpace(folder)
+		if clean == "" {
+			continue
+		}
+		if isSentFolderAlias(clean) {
+			return clean
+		}
+	}
+	return ""
+}
+
+func isSentFolderAlias(folder string) bool {
+	segments := strings.FieldsFunc(strings.ToLower(strings.TrimSpace(folder)), func(r rune) bool {
+		return r == '/' || r == '\\' || r == '.'
+	})
+	for _, segment := range segments {
+		words := strings.Fields(strings.ReplaceAll(segment, "_", " "))
+		if len(words) == 0 {
+			continue
+		}
+		if words[0] == "sent" {
+			return true
+		}
+	}
+	return false
 }
 
 func probeDomains(acct config.Account) []string {
