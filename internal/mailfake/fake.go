@@ -23,11 +23,13 @@ type Call struct {
 
 // Message provides a fixture envelope and body payload.
 type Message struct {
-	UID             mail.UID
-	Envelope        mail.MessageEnvelope
-	Body            string
-	VisibleByPolicy bool
-	SearchByHeader  map[string][]mail.UID
+	UID                mail.UID
+	Envelope           mail.MessageEnvelope
+	Body               string
+	VisibleByPolicy    bool
+	SearchByHeader     map[string][]mail.UID
+	Seen               bool
+	MarksSeenOnPreview bool
 }
 
 // FolderData stores per-folder adapter state.
@@ -60,6 +62,7 @@ const (
 	methodList       = "list"
 	methodHeaders    = "headers"
 	methodFetch      = "fetch"
+	methodSeen       = "seen"
 	methodPreview    = "preview"
 )
 
@@ -450,14 +453,52 @@ func (a *Adapter) FetchBodyPreview(_ context.Context, acct config.Account, folde
 	if !ok {
 		return "", errors.New("message not found")
 	}
-	if maxBytes <= 0 {
+	if maxBytes <= 0 || len(msg.Body) <= maxBytes {
 		return msg.Body, nil
 	}
-	body := msg.Body
-	if len(body) > maxBytes {
-		body = body[:maxBytes]
+	return msg.Body[:maxBytes], nil
+}
+
+// FetchBodyPreviewAndSeenState returns a bounded body preview with observed
+// before/after seen state.
+func (a *Adapter) FetchBodyPreviewAndSeenState(ctx context.Context, acct config.Account, folder string, uid mail.UID, maxBytes int) (string, mail.ReadStateProbeResult, error) {
+	observed, seenBefore, err := a.FetchSeenState(ctx, acct, folder, uid)
+	if err != nil {
+		return "", mail.ReadStateProbeResult{}, err
 	}
-	return body, nil
+	if !observed {
+		return "", mail.ReadStateProbeResult{}, nil
+	}
+	body, err := a.FetchBodyPreview(ctx, acct, folder, uid, maxBytes)
+	if err != nil {
+		return "", mail.ReadStateProbeResult{}, err
+	}
+	fd, ok := a.folder(acct, folder)
+	if !ok {
+		return "", mail.ReadStateProbeResult{}, errors.New("folder not found: " + acct.ID + ":" + folder)
+	}
+	msg := fd.Messages[uid]
+	return body, mail.ReadStateProbeResult{Observed: true, SeenBefore: seenBefore, SeenAfter: seenBefore || msg.MarksSeenOnPreview}, nil
+}
+
+// FetchSeenState returns whether a UID exists and whether it has been seen.
+func (a *Adapter) FetchSeenState(_ context.Context, acct config.Account, folder string, uid mail.UID) (bool, bool, error) {
+	a.appendCall(methodSeen, acct.ID, folder, "uid="+fmt.Sprintf("%d", uid))
+	if err := a.checkFailure(methodSeen, acct.ID, folder, ""); err != nil {
+		return false, false, err
+	}
+	if err := a.checkFailure(methodPreview, acct.ID, folder, ""); err != nil {
+		return false, false, err
+	}
+	fd, ok := a.folder(acct, folder)
+	if !ok {
+		return false, false, errors.New("folder not found: " + acct.ID + ":" + folder)
+	}
+	msg, ok := fd.Messages[uid]
+	if !ok {
+		return false, false, nil
+	}
+	return true, msg.Seen, nil
 }
 
 func (a *Adapter) folder(acct config.Account, folder string) (FolderData, bool) {

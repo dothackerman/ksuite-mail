@@ -90,8 +90,16 @@ func (unavailableSource) FetchEnvelopes(context.Context, config.Account, string,
 	return nil, mail.ErrSourceUnavailable
 }
 
+func (unavailableSource) FetchSeenState(context.Context, config.Account, string, mail.UID) (bool, bool, error) {
+	return false, false, mail.ErrSourceUnavailable
+}
+
 func (unavailableSource) FetchBodyPreview(context.Context, config.Account, string, mail.UID, int) (string, error) {
 	return "", mail.ErrSourceUnavailable
+}
+
+func (unavailableSource) FetchBodyPreviewAndSeenState(context.Context, config.Account, string, mail.UID, int) (string, mail.ReadStateProbeResult, error) {
+	return "", mail.ReadStateProbeResult{}, mail.ErrSourceUnavailable
 }
 
 // Options configures the daemon's view of the deployment.

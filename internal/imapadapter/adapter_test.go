@@ -195,6 +195,167 @@ func TestSelectFolderUsesReadOnlySelectionAndReturnsUIDState(t *testing.T) {
 	}
 }
 
+func TestFetchBodyPreviewAndSeenStateFetchesPostPeekFlagsSeparately(t *testing.T) {
+	ln, roots, commands := newBodyPeekTLSServer(t)
+	defer func() { _ = ln.Close() }()
+
+	host, portText, err := net.SplitHostPort(ln.Addr().String())
+	if err != nil {
+		t.Fatalf("split listener address: %v", err)
+	}
+	var port int
+	if _, err := fmt.Sscanf(portText, "%d", &port); err != nil {
+		t.Fatalf("parse port %q: %v", portText, err)
+	}
+	acct := testAccount(t)
+	acct.Host = host
+	acct.Port = port
+
+	src := &Source{
+		secretsPath: writeTestSecrets(t),
+		timeout:     time.Second,
+		tlsConfig:   &tls.Config{RootCAs: roots},
+	}
+
+	preview, state, err := src.FetchBodyPreviewAndSeenState(context.Background(), acct, "INBOX", 10, 1)
+	if err != nil {
+		t.Fatalf("FetchBodyPreviewAndSeenState: %v", err)
+	}
+	if preview != "x" {
+		t.Fatalf("preview = %q, want x", preview)
+	}
+	if !state.Observed || state.SeenBefore || !state.SeenAfter {
+		t.Fatalf("state = %+v, want observed unseen before seen after", state)
+	}
+
+	var gotCommands []string
+	for cmd := range commands {
+		gotCommands = append(gotCommands, cmd)
+	}
+	var uidFetches []string
+	for _, cmd := range gotCommands {
+		if strings.Contains(cmd, "UID FETCH") {
+			uidFetches = append(uidFetches, cmd)
+		}
+	}
+	if len(uidFetches) != 3 {
+		t.Fatalf("UID FETCH commands = %#v, want before flags, body peek, after flags", uidFetches)
+	}
+	if !strings.Contains(uidFetches[0], "FLAGS") || strings.Contains(uidFetches[0], "BODY") {
+		t.Fatalf("before flags command = %q, want FLAGS only", uidFetches[0])
+	}
+	if !strings.Contains(uidFetches[1], "BODY.PEEK") || strings.Contains(uidFetches[1], "FLAGS") {
+		t.Fatalf("body command = %q, want BODY.PEEK without FLAGS", uidFetches[1])
+	}
+	if !strings.Contains(uidFetches[2], "FLAGS") || strings.Contains(uidFetches[2], "BODY") {
+		t.Fatalf("after flags command = %q, want FLAGS only", uidFetches[2])
+	}
+}
+
+func TestFetchBodyPreviewUsesSingleBodyPeekFetch(t *testing.T) {
+	ln, roots, commands := newBodyPeekTLSServer(t)
+	defer func() { _ = ln.Close() }()
+
+	host, portText, err := net.SplitHostPort(ln.Addr().String())
+	if err != nil {
+		t.Fatalf("split listener address: %v", err)
+	}
+	var port int
+	if _, err := fmt.Sscanf(portText, "%d", &port); err != nil {
+		t.Fatalf("parse port %q: %v", portText, err)
+	}
+	acct := testAccount(t)
+	acct.Host = host
+	acct.Port = port
+
+	src := &Source{
+		secretsPath: writeTestSecrets(t),
+		timeout:     time.Second,
+		tlsConfig:   &tls.Config{RootCAs: roots},
+	}
+
+	preview, err := src.FetchBodyPreview(context.Background(), acct, "INBOX", 10, 1)
+	if err != nil {
+		t.Fatalf("FetchBodyPreview: %v", err)
+	}
+	if preview != "x" {
+		t.Fatalf("preview = %q, want x", preview)
+	}
+
+	var gotCommands []string
+	for cmd := range commands {
+		gotCommands = append(gotCommands, cmd)
+	}
+	var uidFetches []string
+	for _, cmd := range gotCommands {
+		if strings.Contains(cmd, "UID FETCH") {
+			uidFetches = append(uidFetches, cmd)
+		}
+	}
+	if len(uidFetches) != 1 {
+		t.Fatalf("UID FETCH commands = %#v, want one body peek", uidFetches)
+	}
+	if !strings.Contains(uidFetches[0], "BODY.PEEK") || strings.Contains(uidFetches[0], "FLAGS") {
+		t.Fatalf("body command = %q, want BODY.PEEK without FLAGS", uidFetches[0])
+	}
+}
+
+func TestFetchBodyPreviewNormalizesUIDFetchTimeout(t *testing.T) {
+	ln, roots := newUIDFetchHangingTLSServer(t)
+	defer func() { _ = ln.Close() }()
+
+	host, portText, err := net.SplitHostPort(ln.Addr().String())
+	if err != nil {
+		t.Fatalf("split listener address: %v", err)
+	}
+	var port int
+	if _, err := fmt.Sscanf(portText, "%d", &port); err != nil {
+		t.Fatalf("parse port %q: %v", portText, err)
+	}
+	acct := testAccount(t)
+	acct.Host = host
+	acct.Port = port
+
+	src := &Source{
+		secretsPath: writeTestSecrets(t),
+		timeout:     50 * time.Millisecond,
+		tlsConfig:   &tls.Config{RootCAs: roots},
+	}
+
+	_, err = src.FetchBodyPreview(context.Background(), acct, "INBOX", 10, 1)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("FetchBodyPreview error = %v, want DeadlineExceeded", err)
+	}
+}
+
+func TestFetchSeenStateNormalizesUIDFetchTimeout(t *testing.T) {
+	ln, roots := newUIDFetchHangingTLSServer(t)
+	defer func() { _ = ln.Close() }()
+
+	host, portText, err := net.SplitHostPort(ln.Addr().String())
+	if err != nil {
+		t.Fatalf("split listener address: %v", err)
+	}
+	var port int
+	if _, err := fmt.Sscanf(portText, "%d", &port); err != nil {
+		t.Fatalf("parse port %q: %v", portText, err)
+	}
+	acct := testAccount(t)
+	acct.Host = host
+	acct.Port = port
+
+	src := &Source{
+		secretsPath: writeTestSecrets(t),
+		timeout:     50 * time.Millisecond,
+		tlsConfig:   &tls.Config{RootCAs: roots},
+	}
+
+	_, _, err = src.FetchSeenState(context.Background(), acct, "INBOX", 10)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("FetchSeenState error = %v, want DeadlineExceeded", err)
+	}
+}
+
 func testAccount(t *testing.T) config.Account {
 	t.Helper()
 	tlsEnabled := true
@@ -407,6 +568,128 @@ func newHeaderSearchTLSServer(t *testing.T) (net.Listener, *x509.CertPool, <-cha
 		}
 	}()
 	return ln, roots, commands
+}
+
+func newBodyPeekTLSServer(t *testing.T) (net.Listener, *x509.CertPool, <-chan string) {
+	t.Helper()
+	cert, roots := testCertificate(t)
+	base, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		if errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.EACCES) || strings.Contains(err.Error(), "operation not permitted") {
+			t.Skipf("TCP listener denied by environment: %v", err)
+		}
+		t.Fatalf("listen tcp: %v", err)
+	}
+	ln := tls.NewListener(base, &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12})
+	commands := make(chan string, 12)
+	go func() {
+		defer close(commands)
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		r := bufio.NewReader(conn)
+		w := bufio.NewWriter(conn)
+		writeIMAPLine(w, "* OK ready")
+		flagsFetchCount := 0
+		for {
+			line, err := r.ReadString('\n')
+			if err != nil {
+				return
+			}
+			line = strings.TrimRight(line, "\r\n")
+			commands <- line
+			fields := strings.Fields(line)
+			if len(fields) < 2 {
+				continue
+			}
+			tag := fields[0]
+			switch strings.ToUpper(fields[1]) {
+			case "LOGIN":
+				writeIMAPLine(w, tag+" OK LOGIN completed")
+			case "EXAMINE":
+				writeIMAPLine(w, "* FLAGS (\\Seen)")
+				writeIMAPLine(w, "* 1 EXISTS")
+				writeIMAPLine(w, tag+" OK [READ-ONLY] EXAMINE completed")
+			case "UID":
+				if strings.Contains(strings.ToUpper(line), "BODY") {
+					_, _ = w.WriteString("* 1 FETCH (UID 10 BODY[TEXT]<0> {1}\r\nx)\r\n")
+					_ = w.Flush()
+				} else if strings.Contains(strings.ToUpper(line), "FLAGS") {
+					flagsFetchCount++
+					if flagsFetchCount == 1 {
+						writeIMAPLine(w, "* 1 FETCH (UID 10 FLAGS ())")
+					} else {
+						writeIMAPLine(w, "* 1 FETCH (UID 10 FLAGS (\\Seen))")
+					}
+				} else {
+					writeIMAPLine(w, tag+" BAD unsupported fetch")
+					continue
+				}
+				writeIMAPLine(w, tag+" OK FETCH completed")
+			case "LOGOUT":
+				writeIMAPLine(w, "* BYE closing")
+				writeIMAPLine(w, tag+" OK LOGOUT completed")
+				return
+			default:
+				writeIMAPLine(w, tag+" BAD unsupported")
+			}
+		}
+	}()
+	return ln, roots, commands
+}
+
+func newUIDFetchHangingTLSServer(t *testing.T) (net.Listener, *x509.CertPool) {
+	t.Helper()
+	cert, roots := testCertificate(t)
+	base, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		if errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.EACCES) || strings.Contains(err.Error(), "operation not permitted") {
+			t.Skipf("TCP listener denied by environment: %v", err)
+		}
+		t.Fatalf("listen tcp: %v", err)
+	}
+	ln := tls.NewListener(base, &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12})
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		r := bufio.NewReader(conn)
+		w := bufio.NewWriter(conn)
+		writeIMAPLine(w, "* OK ready")
+		for {
+			line, err := r.ReadString('\n')
+			if err != nil {
+				return
+			}
+			fields := strings.Fields(strings.TrimRight(line, "\r\n"))
+			if len(fields) < 2 {
+				continue
+			}
+			tag := fields[0]
+			switch strings.ToUpper(fields[1]) {
+			case "LOGIN":
+				writeIMAPLine(w, tag+" OK LOGIN completed")
+			case "EXAMINE":
+				writeIMAPLine(w, "* FLAGS (\\Seen)")
+				writeIMAPLine(w, "* 1 EXISTS")
+				writeIMAPLine(w, tag+" OK [READ-ONLY] EXAMINE completed")
+			case "UID":
+				time.Sleep(2 * time.Second)
+				return
+			case "LOGOUT":
+				writeIMAPLine(w, "* BYE closing")
+				writeIMAPLine(w, tag+" OK LOGOUT completed")
+				return
+			default:
+				writeIMAPLine(w, tag+" BAD unsupported")
+			}
+		}
+	}()
+	return ln, roots
 }
 
 func writeIMAPLine(w *bufio.Writer, line string) {

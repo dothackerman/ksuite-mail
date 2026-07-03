@@ -21,6 +21,14 @@ type RemoteFolderState struct {
 	SelectionMode string
 }
 
+// ReadStateProbeResult reports whether a bounded preview observed message seen
+// state before and after the fetch.
+type ReadStateProbeResult struct {
+	Observed   bool
+	SeenBefore bool
+	SeenAfter  bool
+}
+
 // Source is the narrow adapter interface that hides IMAP details.
 type Source interface {
 	Capabilities(ctx context.Context, acct config.Account) ([]string, error)
@@ -30,5 +38,7 @@ type Source interface {
 	ListUIDs(ctx context.Context, acct config.Account, folder string, scope UIDRange) ([]UID, error)
 	FetchHeaders(ctx context.Context, acct config.Account, folder string, uids []UID) ([]MessageHeaders, error)
 	FetchEnvelopes(ctx context.Context, acct config.Account, folder string, uids []UID) ([]MessageEnvelope, error)
+	FetchSeenState(ctx context.Context, acct config.Account, folder string, uid UID) (bool, bool, error)
 	FetchBodyPreview(ctx context.Context, acct config.Account, folder string, uid UID, maxBytes int) (string, error)
+	FetchBodyPreviewAndSeenState(ctx context.Context, acct config.Account, folder string, uid UID, maxBytes int) (string, ReadStateProbeResult, error)
 }

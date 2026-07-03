@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -15,6 +16,7 @@ import (
 )
 
 const probeNegativeValue = "ksuite-mail-probe.invalid"
+const readStateFixtureScanLimit = 10
 
 type checkID string
 
@@ -135,12 +137,27 @@ func (Runner) RunIMAP(ctx context.Context, src mail.Source, acct config.Account)
 			uidBehaviorCheck = probeUIDBehavior(ctx, src, acct, folder)
 			checks = append(checks, uidBehaviorCheck)
 			checks = append(checks, checkRefreshStrategy(caps, folderState, uidBehaviorCheck))
-			checks = append(checks, probeDomainHeaders(ctx, src, acct, folder))
-			checks = append(checks, probeReadState(ctx, src, acct, folder))
+			domainHeaderResult := probeDomainHeaders(ctx, src, acct, folder)
+			checks = append(checks, domainHeaderResult.check)
+			if readStatePrerequisitesMet(acct, domainHeaderResult) {
+				checks = append(checks, probeReadState(ctx, src, acct, folder, state, domainHeaderResult.evidence))
+			} else {
+				checks = append(checks, probeCheck(checkReadState, api.ProbeStatusInconclusive, "prerequisite_failed", "read-state probe requires validated domain-header search"))
+			}
 		}
 	}
 
 	return response(acct, checks)
+}
+
+func readStatePrerequisitesMet(acct config.Account, domainHeaderResult domainHeaderProbeResult) bool {
+	if acct.Policy != config.PolicyDomain {
+		return true
+	}
+	if domainHeaderResult.check.Status == api.ProbeStatusFailed {
+		return false
+	}
+	return len(domainHeaderResult.evidence) > 0
 }
 
 func response(acct config.Account, checks []api.ProbeCheck) api.ProbeIMAPResponse {
@@ -231,17 +248,30 @@ func supportsCondstore(caps []string) bool {
 	return hasCapability(caps, "CONDSTORE") || hasCapability(caps, "QRESYNC")
 }
 
-func probeDomainHeaders(ctx context.Context, src mail.Source, acct config.Account, folder string) api.ProbeCheck {
+type domainHeaderProbeResult struct {
+	check    api.ProbeCheck
+	evidence []domainHeaderEvidence
+}
+
+type domainHeaderEvidence struct {
+	folder string
+	header string
+	domain string
+	uids   []mail.UID
+}
+
+func probeDomainHeaders(ctx context.Context, src mail.Source, acct config.Account, folder string) domainHeaderProbeResult {
 	if acct.Policy == config.PolicyFull {
-		return probeCheck(checkDomainHeader, api.ProbeStatusNotApplicable, "full_policy", "full-policy accounts do not depend on domain-header filtering")
+		return domainHeaderProbeResult{check: probeCheck(checkDomainHeader, api.ProbeStatusNotApplicable, "full_policy", "full-policy accounts do not depend on domain-header filtering")}
 	}
 	if len(acct.Domains) == 0 {
-		return probeCheck(checkDomainHeader, api.ProbeStatusInconclusive, "no_domain", "domain-policy account has no configured domain")
+		return domainHeaderProbeResult{check: probeCheck(checkDomainHeader, api.ProbeStatusInconclusive, "no_domain", "domain-policy account has no configured domain")}
 	}
 	sentFolder := sentProbeFolder(acct)
 	headers := []string{"From", "To", "Cc", "Bcc"}
 	facts := &api.ProbeFacts{DomainHeaderSearch: make([]api.DomainHeaderSearch, 0, len(headers)*len(acct.Domains))}
 	counts := make([]string, 0, len(headers)*len(acct.Domains))
+	evidence := make([]domainHeaderEvidence, 0, len(headers)*len(acct.Domains))
 	missingFixture := false
 	checkedDomain := false
 	for _, domain := range acct.Domains {
@@ -268,14 +298,14 @@ func probeDomainHeaders(ctx context.Context, src mail.Source, acct config.Accoun
 			}
 			uids, err := src.SearchAllowed(ctx, acct, targetFolder, header, domain, mail.UIDRange{})
 			if err != nil {
-				return probeFailure(checkDomainHeader, err)
+				return domainHeaderProbeResult{check: probeFailure(checkDomainHeader, err)}
 			}
 			if len(uids) == 0 {
 				missingFixture = true
 			}
 			negativeUIDs, err := src.SearchAllowed(ctx, acct, targetFolder, header, probeNegativeValue, mail.UIDRange{})
 			if err != nil {
-				return probeFailure(checkDomainHeader, err)
+				return domainHeaderProbeResult{check: probeFailure(checkDomainHeader, err)}
 			}
 			nonmatchingVisible := len(negativeUIDs) > 0
 			facts.DomainHeaderSearch = append(facts.DomainHeaderSearch, api.DomainHeaderSearch{
@@ -286,32 +316,118 @@ func probeDomainHeaders(ctx context.Context, src mail.Source, acct config.Accoun
 			})
 			if len(negativeUIDs) > 0 {
 				detail := fmt.Sprintf("header=%s domain=%s domain_index_checked=true nonmatching_visible=true", strings.ToLower(header), domain)
-				return probeCheckFacts(checkDomainHeader, api.ProbeStatusFailed, "header_search_overbroad", detail, facts)
+				return domainHeaderProbeResult{check: probeCheckFacts(checkDomainHeader, api.ProbeStatusFailed, "header_search_overbroad", detail, facts)}
+			}
+			if len(uids) > 0 {
+				evidence = append(evidence, domainHeaderEvidence{
+					folder: targetFolder,
+					header: header,
+					domain: domain,
+					uids:   append([]mail.UID(nil), uids...),
+				})
 			}
 			counts = append(counts, strings.ToLower(header)+"_count="+strconv.Itoa(len(uids)))
 		}
 	}
 	if !checkedDomain {
-		return probeCheck(checkDomainHeader, api.ProbeStatusInconclusive, "no_domain", "domain-policy account has no configured domain")
+		return domainHeaderProbeResult{check: probeCheck(checkDomainHeader, api.ProbeStatusInconclusive, "no_domain", "domain-policy account has no configured domain")}
 	}
 	if missingFixture {
-		return probeCheckFacts(checkDomainHeader, api.ProbeStatusInconclusive, "fixture_required", strings.Join(counts, " "), facts)
+		return domainHeaderProbeResult{check: probeCheckFacts(checkDomainHeader, api.ProbeStatusInconclusive, "fixture_required", strings.Join(counts, " "), facts), evidence: evidence}
 	}
-	return probeCheckFacts(checkDomainHeader, api.ProbeStatusPassed, "header_search_ok", strings.Join(counts, " "), facts)
+	return domainHeaderProbeResult{check: probeCheckFacts(checkDomainHeader, api.ProbeStatusPassed, "header_search_ok", strings.Join(counts, " "), facts), evidence: evidence}
 }
 
-func probeReadState(ctx context.Context, src mail.Source, acct config.Account, folder string) api.ProbeCheck {
-	uids, err := src.ListUIDs(ctx, acct, folder, mail.UIDRange{})
+func probeReadState(ctx context.Context, src mail.Source, acct config.Account, folder string, state mail.RemoteFolderState, evidence []domainHeaderEvidence) api.ProbeCheck {
+	uids, err := readStateFixtureUIDs(ctx, src, acct, folder, state, evidence)
 	if err != nil {
 		return probeFailure(checkReadState, err)
+	}
+	if len(uids) > readStateFixtureScanLimit {
+		uids = uids[len(uids)-readStateFixtureScanLimit:]
 	}
 	if len(uids) == 0 {
 		return probeCheck(checkReadState, api.ProbeStatusInconclusive, "fixture_required", "BODY.PEEK read-state fixture is required")
 	}
-	if _, err := src.FetchBodyPreview(ctx, acct, folder, uids[0], 1); err != nil {
-		return probeFailure(checkReadState, err)
+	var seenState mail.ReadStateProbeResult
+	foundFixture := false
+	for _, uid := range uids {
+		observed, seenBefore, err := src.FetchSeenState(ctx, acct, folder, uid)
+		if err != nil {
+			return probeFailure(checkReadState, err)
+		}
+		if !observed || seenBefore {
+			continue
+		}
+		_, seenState, err = src.FetchBodyPreviewAndSeenState(ctx, acct, folder, uid, 1)
+		if err != nil {
+			return probeFailure(checkReadState, err)
+		}
+		if seenState.Observed && !seenState.SeenBefore {
+			foundFixture = true
+			break
+		}
 	}
-	return probeCheck(checkReadState, api.ProbeStatusPassed, "body_peek_ok", "body_peek_exercised=true")
+	if !foundFixture {
+		return probeCheck(checkReadState, api.ProbeStatusInconclusive, "fixture_required", "BODY.PEEK read-state fixture is required")
+	}
+	seenChanged := seenState.SeenAfter
+	facts := &api.ProbeFacts{
+		ReadStatePreserved: boolPtr(!seenChanged),
+	}
+	if seenChanged {
+		return probeCheckFacts(checkReadState, api.ProbeStatusFailed, "body_marked_seen", "seen_state_changed=true", facts)
+	}
+	return probeCheckFacts(checkReadState, api.ProbeStatusPassed, "body_peek_ok", "body_peek_exercised=true", facts)
+}
+
+func readStateFixtureUIDs(ctx context.Context, src mail.Source, acct config.Account, folder string, state mail.RemoteFolderState, evidence []domainHeaderEvidence) ([]mail.UID, error) {
+	scope := readStateFixtureScope(state)
+	if acct.Policy != config.PolicyDomain {
+		return src.ListUIDs(ctx, acct, folder, scope)
+	}
+
+	uidsByValue := make(map[mail.UID]struct{})
+	for _, item := range evidence {
+		if strings.TrimSpace(item.folder) != strings.TrimSpace(folder) {
+			continue
+		}
+		for _, uid := range item.uids {
+			if uidInRange(uid, scope) {
+				uidsByValue[uid] = struct{}{}
+			}
+		}
+	}
+
+	out := make([]mail.UID, 0, len(uidsByValue))
+	for uid := range uidsByValue {
+		out = append(out, uid)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out, nil
+}
+
+func readStateFixtureScope(state mail.RemoteFolderState) mail.UIDRange {
+	if state.UIDNEXT == 0 {
+		return mail.UIDRange{}
+	}
+	max := state.UIDNEXT - 1
+	min := uint64(1)
+	if max >= readStateFixtureScanLimit {
+		min = max - readStateFixtureScanLimit + 1
+	}
+	return mail.UIDRange{Min: min, Max: max}
+}
+
+func uidInRange(uid mail.UID, scope mail.UIDRange) bool {
+	value := uint64(uid)
+	if scope.Min != 0 && value < scope.Min {
+		return false
+	}
+	if scope.Max != 0 && value > scope.Max {
+		return false
+	}
+	return true
 }
 
 func domainProbeNotRun(acct config.Account) api.ProbeCheck {

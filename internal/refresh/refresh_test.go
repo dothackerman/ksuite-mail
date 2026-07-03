@@ -1469,8 +1469,16 @@ func (s *trackingSource) FetchEnvelopes(context.Context, config.Account, string,
 	return nil, nil
 }
 
+func (s *trackingSource) FetchSeenState(context.Context, config.Account, string, mail.UID) (bool, bool, error) {
+	return false, false, nil
+}
+
 func (s *trackingSource) FetchBodyPreview(context.Context, config.Account, string, mail.UID, int) (string, error) {
 	return "", nil
+}
+
+func (s *trackingSource) FetchBodyPreviewAndSeenState(context.Context, config.Account, string, mail.UID, int) (string, mail.ReadStateProbeResult, error) {
+	return "", mail.ReadStateProbeResult{}, nil
 }
 
 func mustOpenRepoForRefresh(t *testing.T) *cache.Repository {

@@ -166,20 +166,111 @@ func (s *Source) FetchBodyPreview(ctx context.Context, acct config.Account, fold
 		return "", normalizeCommandError(err)
 	}
 
+	preview, err := c.fetchBodyPreview(uid, maxBytes)
+	if err != nil {
+		return "", normalizeCommandError(err)
+	}
+	return preview, nil
+}
+
+// FetchBodyPreviewAndSeenState returns a bounded body preview with observed
+// before/after \\Seen state.
+func (s *Source) FetchBodyPreviewAndSeenState(ctx context.Context, acct config.Account, folder string, uid mail.UID, maxBytes int) (string, mail.ReadStateProbeResult, error) {
+	c, err := s.connect(ctx, acct)
+	if err != nil {
+		return "", mail.ReadStateProbeResult{}, err
+	}
+	defer c.close()
+	if _, err := c.client.Select(folder, &imap.SelectOptions{ReadOnly: true}).Wait(); err != nil {
+		return "", mail.ReadStateProbeResult{}, normalizeCommandError(err)
+	}
+
+	observedBefore, seenBefore, err := c.fetchSeenState(uid)
+	if err != nil {
+		return "", mail.ReadStateProbeResult{}, normalizeCommandError(err)
+	}
+	if !observedBefore {
+		return "", mail.ReadStateProbeResult{}, nil
+	}
+
+	preview, err := c.fetchBodyPreview(uid, maxBytes)
+	if err != nil {
+		return "", mail.ReadStateProbeResult{}, normalizeCommandError(err)
+	}
+
+	observedAfter, seenAfter, err := c.fetchSeenState(uid)
+	if err != nil {
+		return "", mail.ReadStateProbeResult{}, normalizeCommandError(err)
+	}
+	if !observedAfter {
+		return "", mail.ReadStateProbeResult{}, nil
+	}
+	return preview, mail.ReadStateProbeResult{
+		Observed:   true,
+		SeenBefore: seenBefore,
+		SeenAfter:  seenAfter,
+	}, nil
+
+}
+
+// FetchSeenState returns whether a UID was found and whether it currently has
+// the IMAP \\Seen flag.
+func (s *Source) FetchSeenState(ctx context.Context, acct config.Account, folder string, uid mail.UID) (bool, bool, error) {
+	c, err := s.connect(ctx, acct)
+	if err != nil {
+		return false, false, err
+	}
+	defer c.close()
+	if _, err := c.client.Select(folder, &imap.SelectOptions{ReadOnly: true}).Wait(); err != nil {
+		return false, false, normalizeCommandError(err)
+	}
+
+	observed, seen, err := c.fetchSeenState(uid)
+	if err != nil {
+		return false, false, normalizeCommandError(err)
+	}
+	return observed, seen, nil
+}
+
+func (c liveConn) fetchSeenState(uid mail.UID) (bool, bool, error) {
+	uidSet := imap.UIDSetNum(imap.UID(uid))
+	buf, err := c.client.Fetch(uidSet, &imap.FetchOptions{
+		Flags: true,
+	}).Collect()
+	if err != nil {
+		return false, false, err
+	}
+	if len(buf) == 0 {
+		return false, false, nil
+	}
+	return true, hasSeenFlag(buf[0].Flags), nil
+}
+
+func (c liveConn) fetchBodyPreview(uid mail.UID, maxBytes int) (string, error) {
+	uidSet := imap.UIDSetNum(imap.UID(uid))
 	bodySection := &imap.FetchItemBodySection{Specifier: imap.PartSpecifierText, Peek: true}
 	if maxBytes > 0 {
 		bodySection.Partial = &imap.SectionPartial{Offset: 0, Size: int64(maxBytes)}
 	}
-	messages, err := c.client.Fetch(imap.UIDSetNum(imap.UID(uid)), &imap.FetchOptions{
+	bodyBuf, err := c.client.Fetch(uidSet, &imap.FetchOptions{
 		BodySection: []*imap.FetchItemBodySection{bodySection},
 	}).Collect()
 	if err != nil {
-		return "", normalizeCommandError(err)
+		return "", err
 	}
-	if len(messages) == 0 {
+	if len(bodyBuf) == 0 {
 		return "", nil
 	}
-	return string(messages[0].FindBodySection(bodySection)), nil
+	return string(bodyBuf[0].FindBodySection(bodySection)), nil
+}
+
+func hasSeenFlag(flags []imap.Flag) bool {
+	for _, flag := range flags {
+		if flag == imap.FlagSeen {
+			return true
+		}
+	}
+	return false
 }
 
 type liveConn struct {

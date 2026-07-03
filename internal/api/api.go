@@ -242,6 +242,7 @@ type ProbeFacts struct {
 	Folder                 string               `json:"folder,omitempty"`
 	ReadOnly               *bool                `json:"read_only,omitempty"`
 	SelectionMode          string               `json:"selection_mode,omitempty"`
+	ReadStatePreserved     *bool                `json:"read_state_preserved,omitempty"`
 	CondstoreSupported     *bool                `json:"condstore_supported,omitempty"`
 	HighestModSeqAvailable *bool                `json:"highestmodseq_available,omitempty"`
 	UIDRangeSupported      *bool                `json:"uid_range_supported,omitempty"`

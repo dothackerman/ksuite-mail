@@ -18,13 +18,14 @@ import (
 
 func TestRunnerRunIMAPChecklistMatrix(t *testing.T) {
 	tests := []struct {
-		name       string
-		account    config.Account
-		source     mail.Source
-		want       map[string]api.ProbeCheck
-		wantOrder  []string
-		wantCalls  []string
-		wantStatus string
+		name                   string
+		account                config.Account
+		source                 mail.Source
+		want                   map[string]api.ProbeCheck
+		wantOrder              []string
+		wantCalls              []string
+		wantStatus             string
+		wantReadStatePreserved *bool
 	}{
 		{
 			name:    "capability failure skips dependent checks",
@@ -247,6 +248,85 @@ func TestRunnerRunIMAPChecklistMatrix(t *testing.T) {
 			},
 		},
 		{
+			name:    "read state preview preserves seen state",
+			account: fullAccount("INBOX"),
+			source: probeAdapter(map[string][]mailfake.Message{
+				"INBOX": {
+					{UID: 10, VisibleByPolicy: true, Body: "fixture body", MarksSeenOnPreview: false},
+					{UID: 20, VisibleByPolicy: true, Body: "fixture body"},
+				},
+			}),
+			wantStatus: api.ProbeStatusPassed,
+			want: map[string]api.ProbeCheck{
+				"read_state": {Status: api.ProbeStatusPassed, Code: "body_peek_ok"},
+			},
+			wantCalls:              []string{"capability", "folders", "select", "list", "list", "list", "seen", "seen", "preview"},
+			wantReadStatePreserved: boolPtr(true),
+		},
+		{
+			name:    "read state preview marks seen",
+			account: fullAccount("INBOX"),
+			source: probeAdapter(map[string][]mailfake.Message{
+				"INBOX": {
+					{UID: 10, VisibleByPolicy: true, Body: "fixture body"},
+					{UID: 20, VisibleByPolicy: true, Body: "fixture body", MarksSeenOnPreview: true},
+				},
+			}),
+			wantStatus: api.ProbeStatusFailed,
+			want: map[string]api.ProbeCheck{
+				"read_state": {Status: api.ProbeStatusFailed, Code: "body_marked_seen"},
+			},
+			wantCalls:              []string{"capability", "folders", "select", "list", "list", "list", "seen", "seen", "preview"},
+			wantReadStatePreserved: boolPtr(false),
+		},
+		{
+			name:    "read state skips already seen fixture",
+			account: fullAccount("INBOX"),
+			source: probeAdapter(map[string][]mailfake.Message{
+				"INBOX": {
+					{UID: 10, VisibleByPolicy: true, Body: "fixture body", Seen: true},
+					{UID: 19, VisibleByPolicy: true, Body: "fixture body", Seen: true},
+					{UID: 20, VisibleByPolicy: true, Body: "fixture body"},
+				},
+			}),
+			wantStatus: api.ProbeStatusPassed,
+			want: map[string]api.ProbeCheck{
+				"read_state": {Status: api.ProbeStatusPassed, Code: "body_peek_ok"},
+			},
+			wantCalls:              []string{"capability", "folders", "select", "list", "list", "list", "seen", "seen", "seen", "preview"},
+			wantReadStatePreserved: boolPtr(true),
+		},
+		{
+			name:    "read state requires an unseen fixture",
+			account: fullAccount("INBOX"),
+			source: probeAdapter(map[string][]mailfake.Message{
+				"INBOX": {
+					{UID: 10, VisibleByPolicy: true, Body: "fixture body", Seen: true},
+					{UID: 19, VisibleByPolicy: true, Body: "fixture body", Seen: true},
+					{UID: 20, VisibleByPolicy: true, Body: "fixture body", Seen: true},
+				},
+			}),
+			wantStatus: api.ProbeStatusInconclusive,
+			want: map[string]api.ProbeCheck{
+				"read_state": {Status: api.ProbeStatusInconclusive, Code: "fixture_required", Detail: "BODY.PEEK read-state fixture is required"},
+			},
+			wantCalls: []string{"capability", "folders", "select", "list", "list", "list", "seen", "seen"},
+		},
+		{
+			name:    "read state unobserved fixture is inconclusive",
+			account: fullAccount("INBOX"),
+			source: unobservedReadStateSource{Source: probeAdapter(map[string][]mailfake.Message{
+				"INBOX": {
+					{UID: 10, VisibleByPolicy: true, Body: "fixture body"},
+					{UID: 20, VisibleByPolicy: true, Body: "fixture body"},
+				},
+			})},
+			wantStatus: api.ProbeStatusInconclusive,
+			want: map[string]api.ProbeCheck{
+				"read_state": {Status: api.ProbeStatusInconclusive, Code: "fixture_required", Detail: "BODY.PEEK read-state fixture is required"},
+			},
+		},
+		{
 			name:       "read state preview errors are sanitized",
 			account:    fullAccount("INBOX"),
 			source:     probeAdapter(map[string][]mailfake.Message{"INBOX": {{UID: 10, VisibleByPolicy: true}, {UID: 20, VisibleByPolicy: true}}}, sourceFailure{method: "preview", account: "rs_info", folder: "INBOX", err: errors.New("FETCH leaked subject pw private text")}),
@@ -272,6 +352,14 @@ func TestRunnerRunIMAPChecklistMatrix(t *testing.T) {
 				if gotCheck.Status != want.Status || gotCheck.Code != want.Code {
 					t.Fatalf("%s = %+v, want status=%q code=%q", id, gotCheck, want.Status, want.Code)
 				}
+				if id == "read_state" && tc.wantReadStatePreserved != nil {
+					if gotCheck.Facts == nil || gotCheck.Facts.ReadStatePreserved == nil {
+						t.Fatalf("%s facts = %+v, want read_state_preserved=%t", id, gotCheck.Facts, *tc.wantReadStatePreserved)
+					}
+					if *gotCheck.Facts.ReadStatePreserved != *tc.wantReadStatePreserved {
+						t.Fatalf("%s read_state_preserved = %t, want %t", id, *gotCheck.Facts.ReadStatePreserved, *tc.wantReadStatePreserved)
+					}
+				}
 				if want.Detail != "" && gotCheck.Detail != want.Detail {
 					t.Fatalf("%s detail = %q, want %q", id, gotCheck.Detail, want.Detail)
 				}
@@ -282,6 +370,201 @@ func TestRunnerRunIMAPChecklistMatrix(t *testing.T) {
 			assertNoRawProviderLeak(t, got)
 		})
 	}
+}
+
+func TestRunnerRunIMAPBoundsReadStateFixtureScan(t *testing.T) {
+	var messages []mailfake.Message
+	for uid := mail.UID(1); uid <= 25; uid++ {
+		messages = append(messages, mailfake.Message{
+			UID:             uid,
+			VisibleByPolicy: true,
+			Body:            "fixture body",
+			Seen:            true,
+		})
+	}
+	source := probeAdapter(map[string][]mailfake.Message{"INBOX": messages})
+
+	got := providerprobe.Runner{}.RunIMAP(context.Background(), source, fullAccount("INBOX"))
+
+	check := checkByID(t, got, "read_state")
+	if check.Status != api.ProbeStatusInconclusive || check.Code != "fixture_required" {
+		t.Fatalf("read_state = %+v, want inconclusive fixture_required", check)
+	}
+	calls := source.CallsSnapshot()
+	var seenCalls int
+	var readStateListPayload string
+	for _, call := range calls {
+		if call.Method == "seen" {
+			seenCalls++
+		}
+		if call.Method == "list" {
+			readStateListPayload = call.Payload
+		}
+	}
+	if seenCalls != 10 {
+		t.Fatalf("seen calls = %d, want bounded scan of 10; calls=%+v", seenCalls, calls)
+	}
+	if readStateListPayload != "16:25" {
+		t.Fatalf("read-state list range = %q, want 16:25; calls=%+v", readStateListPayload, calls)
+	}
+}
+
+func TestRunnerRunIMAPSkipsReadStateWhenDomainHeaderSearchFails(t *testing.T) {
+	source := probeAdapter(map[string][]mailfake.Message{
+		"INBOX": {
+			{UID: 20, VisibleByPolicy: false, Body: "private unread fixture"},
+		},
+	})
+	source.SetSearchResult("rs_info", "INBOX", "From", "regenerativ.ch", []mail.UID{20})
+	source.SetSearchResult("rs_info", "INBOX", "From", "ksuite-mail-probe.invalid", []mail.UID{20})
+
+	got := providerprobe.Runner{}.RunIMAP(context.Background(), source, domainAccount("INBOX", "regenerativ.ch"))
+
+	domainCheck := checkByID(t, got, "domain_header_search")
+	if domainCheck.Status != api.ProbeStatusFailed || domainCheck.Code != "header_search_overbroad" {
+		t.Fatalf("domain_header_search = %+v, want failed header_search_overbroad", domainCheck)
+	}
+	readState := checkByID(t, got, "read_state")
+	if readState.Status != api.ProbeStatusInconclusive || readState.Code != "prerequisite_failed" {
+		t.Fatalf("read_state = %+v, want inconclusive prerequisite_failed", readState)
+	}
+	calls := source.CallsSnapshot()
+	for _, call := range calls {
+		if call.Method == "seen" || call.Method == "preview" {
+			t.Fatalf("domain read-state probe ran after unsafe header search: calls=%+v", calls)
+		}
+	}
+}
+
+func TestRunnerRunIMAPDomainReadStateUsesOnlySameFolderValidatedHeaders(t *testing.T) {
+	source := probeAdapter(map[string][]mailfake.Message{
+		"INBOX": {
+			{UID: 10, VisibleByPolicy: true, Body: "allowed fixture", Seen: true},
+			{UID: 20, VisibleByPolicy: false, Body: "private unread fixture"},
+		},
+		"Sent": {
+			{UID: 30, VisibleByPolicy: true, Body: "sent bcc fixture"},
+		},
+	})
+	for _, header := range []string{"From", "To", "Cc"} {
+		source.SetSearchResult("rs_info", "INBOX", header, "regenerativ.ch", []mail.UID{10})
+		source.SetSearchResult("rs_info", "INBOX", header, "ksuite-mail-probe.invalid", nil)
+	}
+	source.SetSearchResult("rs_info", "INBOX", "Bcc", "regenerativ.ch", []mail.UID{20})
+	source.SetSearchResult("rs_info", "Sent", "Bcc", "regenerativ.ch", []mail.UID{30})
+	source.SetSearchResult("rs_info", "Sent", "Bcc", "ksuite-mail-probe.invalid", nil)
+
+	got := providerprobe.Runner{}.RunIMAP(context.Background(), source, config.Account{
+		ID:      "rs_info",
+		Policy:  config.PolicyDomain,
+		Domains: []string{"regenerativ.ch"},
+		Folders: []string{"INBOX", "Sent"},
+	})
+
+	domainCheck := checkByID(t, got, "domain_header_search")
+	if domainCheck.Status != api.ProbeStatusPassed || domainCheck.Code != "header_search_ok" {
+		t.Fatalf("domain_header_search = %+v, want passed header_search_ok", domainCheck)
+	}
+	check := checkByID(t, got, "read_state")
+	if check.Status != api.ProbeStatusInconclusive || check.Code != "fixture_required" {
+		t.Fatalf("read_state = %+v, want inconclusive fixture_required", check)
+	}
+	calls := source.CallsSnapshot()
+	for _, call := range calls {
+		if call.Method == "preview" {
+			t.Fatalf("domain read-state probe previewed a non-search-approved UID: calls=%+v", calls)
+		}
+		if call.Method == "seen" && call.Payload != "uid=10" {
+			t.Fatalf("domain read-state probe inspected non-search-approved seen state %q: calls=%+v", call.Payload, calls)
+		}
+	}
+}
+
+func TestRunnerRunIMAPDomainReadStateAllowsSafeSameFolderFixtureWhenSentBccMissing(t *testing.T) {
+	source := probeAdapter(map[string][]mailfake.Message{
+		"INBOX": {
+			{UID: 19, VisibleByPolicy: true, Body: "second fixture"},
+			{UID: 20, VisibleByPolicy: true, Body: "allowed fixture"},
+		},
+	})
+	for _, header := range []string{"From", "To", "Cc"} {
+		source.SetSearchResult("rs_info", "INBOX", header, "regenerativ.ch", []mail.UID{20})
+		source.SetSearchResult("rs_info", "INBOX", header, "ksuite-mail-probe.invalid", nil)
+	}
+
+	got := providerprobe.Runner{}.RunIMAP(context.Background(), source, config.Account{
+		ID:      "rs_info",
+		Policy:  config.PolicyDomain,
+		Domains: []string{"regenerativ.ch"},
+		Folders: []string{"INBOX"},
+	})
+
+	domainCheck := checkByID(t, got, "domain_header_search")
+	if domainCheck.Status != api.ProbeStatusInconclusive || domainCheck.Code != "fixture_required" {
+		t.Fatalf("domain_header_search = %+v, want inconclusive fixture_required for missing Sent/Bcc", domainCheck)
+	}
+	readState := checkByID(t, got, "read_state")
+	if readState.Status != api.ProbeStatusPassed || readState.Code != "body_peek_ok" {
+		t.Fatalf("read_state = %+v, want passed body_peek_ok from safe same-folder fixture", readState)
+	}
+	if readState.Facts == nil || readState.Facts.ReadStatePreserved == nil || !*readState.Facts.ReadStatePreserved {
+		t.Fatalf("read_state facts = %+v, want read_state_preserved=true", readState.Facts)
+	}
+	calls := source.CallsSnapshot()
+	for _, call := range calls {
+		if call.Method == "preview" && call.Payload != "uid=20" {
+			t.Fatalf("domain read-state previewed %q, want validated uid=20 only; calls=%+v", call.Payload, calls)
+		}
+	}
+}
+
+func TestRunnerRunIMAPDomainReadStateDoesNotReSearchBeforePreview(t *testing.T) {
+	source := probeAdapter(map[string][]mailfake.Message{
+		"INBOX": {
+			{UID: 20, VisibleByPolicy: true, Body: "allowed fixture", Seen: true},
+			{UID: 21, VisibleByPolicy: true, Body: "unvalidated fixture"},
+		},
+		"Sent": {
+			{UID: 30, VisibleByPolicy: true, Body: "sent bcc fixture"},
+		},
+	})
+	for _, header := range []string{"From", "To", "Cc"} {
+		source.SetSearchResult("rs_info", "INBOX", header, "regenerativ.ch", []mail.UID{20})
+		source.SetSearchResult("rs_info", "INBOX", header, "ksuite-mail-probe.invalid", nil)
+	}
+	source.SetSearchResult("rs_info", "Sent", "Bcc", "regenerativ.ch", []mail.UID{30})
+	source.SetSearchResult("rs_info", "Sent", "Bcc", "ksuite-mail-probe.invalid", nil)
+
+	got := providerprobe.Runner{}.RunIMAP(context.Background(), source, config.Account{
+		ID:      "rs_info",
+		Policy:  config.PolicyDomain,
+		Domains: []string{"regenerativ.ch"},
+		Folders: []string{"INBOX", "Sent"},
+	})
+
+	readState := checkByID(t, got, "read_state")
+	if readState.Status != api.ProbeStatusInconclusive || readState.Code != "fixture_required" {
+		t.Fatalf("read_state = %+v, want inconclusive fixture_required after only validated uid is already seen", readState)
+	}
+	calls := source.CallsSnapshot()
+	searchesBeforeReadState := 0
+	for _, call := range calls {
+		switch call.Method {
+		case "search":
+			searchesBeforeReadState++
+		case "seen":
+			if searchesBeforeReadState != 8 {
+				t.Fatalf("read_state performed extra search before seen check; search count before first seen = %d calls=%+v", searchesBeforeReadState, calls)
+			}
+			if call.Payload != "uid=20" {
+				t.Fatalf("domain read-state inspected %q, want validated uid=20 only; calls=%+v", call.Payload, calls)
+			}
+			return
+		case "preview":
+			t.Fatalf("domain read-state previewed unvalidated UID: calls=%+v", calls)
+		}
+	}
+	t.Fatalf("read_state did not inspect validated evidence; calls=%+v", calls)
 }
 
 func TestRunnerRunIMAPReportsStructuredFolderStateFacts(t *testing.T) {
@@ -817,6 +1100,18 @@ func (s rangeIgnoringSource) ListUIDs(ctx context.Context, acct config.Account, 
 	return s.Source.ListUIDs(ctx, acct, folder, mail.UIDRange{})
 }
 
+type unobservedReadStateSource struct {
+	mail.Source
+}
+
+func (s unobservedReadStateSource) FetchSeenState(context.Context, config.Account, string, mail.UID) (bool, bool, error) {
+	return true, false, nil
+}
+
+func (s unobservedReadStateSource) FetchBodyPreviewAndSeenState(context.Context, config.Account, string, mail.UID, int) (string, mail.ReadStateProbeResult, error) {
+	return "", mail.ReadStateProbeResult{}, nil
+}
+
 func checkByID(t *testing.T, probe api.ProbeIMAPResponse, id string) api.ProbeCheck {
 	t.Helper()
 	for _, check := range probe.Checks {
@@ -897,4 +1192,8 @@ func stringSlicesEqual(got, want []string) bool {
 		}
 	}
 	return true
+}
+
+func boolPtr(v bool) *bool {
+	return &v
 }
