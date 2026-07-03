@@ -267,6 +267,7 @@ func TestProbeIMAPEndpointValidatesAccountAndRunsLiveChecklist(t *testing.T) {
 		},
 	})
 	adapter.SetUIDState("rs_info", "INBOX", 777, 21)
+	adapter.SetHighestModSeq("rs_info", "INBOX", 99)
 	ts := newLocalHTTPServer(t, probeDeployment(t, adapter))
 	defer ts.Close()
 
@@ -340,8 +341,24 @@ func TestProbeIMAPEndpointValidatesAccountAndRunsLiveChecklist(t *testing.T) {
 	if checks["uid_behavior"] != api.ProbeStatusPassed {
 		t.Fatalf("uid_behavior status = %q, want %q", checks["uid_behavior"], api.ProbeStatusPassed)
 	}
+	if checks["refresh_strategy"] != api.ProbeStatusPassed {
+		t.Fatalf("refresh_strategy status = %q, want %q", checks["refresh_strategy"], api.ProbeStatusPassed)
+	}
 	if checks["domain_header_search"] != api.ProbeStatusNotApplicable {
 		t.Fatalf("domain_header_search status = %q, want %q", checks["domain_header_search"], api.ProbeStatusNotApplicable)
+	}
+	refreshStrategy := probeCheckByID(t, probe, "refresh_strategy")
+	if refreshStrategy.Facts == nil {
+		t.Fatalf("refresh_strategy facts missing")
+	}
+	if refreshStrategy.Facts.RefreshStrategy != "modseq" {
+		t.Fatalf("refresh strategy = %q, want modseq", refreshStrategy.Facts.RefreshStrategy)
+	}
+	if refreshStrategy.Facts.CondstoreSupported == nil || !*refreshStrategy.Facts.CondstoreSupported {
+		t.Fatalf("condstore_supported fact = %+v, want true", refreshStrategy.Facts.CondstoreSupported)
+	}
+	if refreshStrategy.Facts.HighestModSeqAvailable == nil || !*refreshStrategy.Facts.HighestModSeqAvailable {
+		t.Fatalf("highestmodseq_available fact = %+v, want true", refreshStrategy.Facts.HighestModSeqAvailable)
 	}
 	if strings.Contains(mustJSON(t, env), "pw") ||
 		strings.Contains(mustJSON(t, env), "CAPABILITY ") {
@@ -632,6 +649,15 @@ func TestProbeIMAPEndpointChecksAllDomainsAndSentBccFolder(t *testing.T) {
 	check := probeCheckByID(t, probe, "domain_header_search")
 	if check.Status != api.ProbeStatusPassed || check.Code != "header_search_ok" {
 		t.Fatalf("domain_header_search check = %+v", check)
+	}
+	if check.Facts == nil || len(check.Facts.DomainHeaderSearch) != 8 {
+		t.Fatalf("domain header search facts missing or incomplete: %+v", check.Facts)
+	}
+	if check.Facts.DomainHeaderSearch[3].Domain != "regenerativ.ch" || check.Facts.DomainHeaderSearch[3].Header != "Bcc" {
+		t.Fatalf("unexpected Bcc fact order/value: %#v", check.Facts.DomainHeaderSearch[3])
+	}
+	if check.Facts.DomainHeaderSearch[7].Domain != "example.org" || check.Facts.DomainHeaderSearch[7].Header != "Bcc" {
+		t.Fatalf("unexpected sent Bcc fact order/value: %#v", check.Facts.DomainHeaderSearch[7])
 	}
 	calls := adapter.CallsSnapshot()
 	var foundSecondDomain, foundSentBcc bool

@@ -67,19 +67,30 @@ func TestProbeFactsUseTypedSafeJSONFields(t *testing.T) {
 	uidvalidity := uint64(777)
 	uidnext := uint64(21)
 	hms := int64(42)
+	condstore := true
+	highestModSeqAvailable := true
+	uidRange := true
 	check := api.ProbeCheck{
 		ID:     "folder_selection",
 		Status: api.ProbeStatusPassed,
 		Code:   "examine_ok",
 		Facts: &api.ProbeFacts{
-			FolderCount:   &count,
-			Folders:       []string{"INBOX", "Sent"},
-			Folder:        "INBOX",
-			ReadOnly:      &readOnly,
-			SelectionMode: "examine",
-			UIDVALIDITY:   &uidvalidity,
-			UIDNEXT:       &uidnext,
-			HighestModSeq: &hms,
+			FolderCount:            &count,
+			Folders:                []string{"INBOX", "Sent"},
+			Folder:                 "INBOX",
+			ReadOnly:               &readOnly,
+			SelectionMode:          "examine",
+			CondstoreSupported:     &condstore,
+			HighestModSeqAvailable: &highestModSeqAvailable,
+			UIDRangeSupported:      &uidRange,
+			RefreshStrategy:        "modseq",
+			UIDVALIDITY:            &uidvalidity,
+			UIDNEXT:                &uidnext,
+			HighestModSeq:          &hms,
+			DomainHeaderSearch: []api.DomainHeaderSearch{
+				{Domain: "example.org", Header: "From", MatchedUIDCount: 1, NonmatchingVisible: false},
+				{Domain: "example.org", Header: "Bcc", MatchedUIDCount: 2, NonmatchingVisible: true},
+			},
 		},
 	}
 
@@ -94,9 +105,18 @@ func TestProbeFactsUseTypedSafeJSONFields(t *testing.T) {
 		`"folders":["INBOX","Sent"]`,
 		`"read_only":true`,
 		`"selection_mode":"examine"`,
+		`"condstore_supported":true`,
+		`"highestmodseq_available":true`,
+		`"uid_range_supported":true`,
+		`"refresh_strategy":"modseq"`,
 		`"uidvalidity":777`,
 		`"uidnext":21`,
 		`"highestmodseq":42`,
+		`"domain_header_search"`,
+		`"domain":"example.org"`,
+		`"header":"Bcc"`,
+		`"matched_uid_count":2`,
+		`"nonmatching_visible":true`,
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("probe facts JSON missing %s in %s", want, got)
