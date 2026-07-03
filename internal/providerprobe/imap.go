@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -302,7 +303,7 @@ func probeDomainHeaders(ctx context.Context, src mail.Source, acct config.Accoun
 }
 
 func probeReadState(ctx context.Context, src mail.Source, acct config.Account, folder string, state mail.RemoteFolderState) api.ProbeCheck {
-	uids, err := src.ListUIDs(ctx, acct, folder, readStateFixtureScope(state))
+	uids, err := readStateFixtureUIDs(ctx, src, acct, folder, state)
 	if err != nil {
 		return probeFailure(checkReadState, err)
 	}
@@ -342,6 +343,37 @@ func probeReadState(ctx context.Context, src mail.Source, acct config.Account, f
 		return probeCheckFacts(checkReadState, api.ProbeStatusFailed, "body_marked_seen", "seen_state_changed=true", facts)
 	}
 	return probeCheckFacts(checkReadState, api.ProbeStatusPassed, "body_peek_ok", "body_peek_exercised=true", facts)
+}
+
+func readStateFixtureUIDs(ctx context.Context, src mail.Source, acct config.Account, folder string, state mail.RemoteFolderState) ([]mail.UID, error) {
+	scope := readStateFixtureScope(state)
+	if acct.Policy != config.PolicyDomain {
+		return src.ListUIDs(ctx, acct, folder, scope)
+	}
+
+	uidsByValue := make(map[mail.UID]struct{})
+	for _, domain := range acct.Domains {
+		domain = strings.TrimSpace(domain)
+		if domain == "" {
+			continue
+		}
+		for _, header := range []string{"From", "To", "Cc", "Bcc"} {
+			uids, err := src.SearchAllowed(ctx, acct, folder, header, domain, scope)
+			if err != nil {
+				return nil, err
+			}
+			for _, uid := range uids {
+				uidsByValue[uid] = struct{}{}
+			}
+		}
+	}
+
+	out := make([]mail.UID, 0, len(uidsByValue))
+	for uid := range uidsByValue {
+		out = append(out, uid)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out, nil
 }
 
 func readStateFixtureScope(state mail.RemoteFolderState) mail.UIDRange {

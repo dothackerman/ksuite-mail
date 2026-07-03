@@ -409,6 +409,35 @@ func TestRunnerRunIMAPBoundsReadStateFixtureScan(t *testing.T) {
 	}
 }
 
+func TestRunnerRunIMAPDomainReadStateUsesOnlySearchApprovedUIDs(t *testing.T) {
+	source := probeAdapter(map[string][]mailfake.Message{
+		"INBOX": {
+			{UID: 10, VisibleByPolicy: true, Body: "allowed fixture", Seen: true},
+			{UID: 20, VisibleByPolicy: false, Body: "private unread fixture"},
+		},
+	})
+	for _, header := range []string{"From", "To", "Cc"} {
+		source.SetSearchResult("rs_info", "INBOX", header, "regenerativ.ch", []mail.UID{10})
+		source.SetSearchResult("rs_info", "INBOX", header, "ksuite-mail-probe.invalid", nil)
+	}
+
+	got := providerprobe.Runner{}.RunIMAP(context.Background(), source, domainAccount("INBOX", "regenerativ.ch"))
+
+	check := checkByID(t, got, "read_state")
+	if check.Status != api.ProbeStatusInconclusive || check.Code != "fixture_required" {
+		t.Fatalf("read_state = %+v, want inconclusive fixture_required", check)
+	}
+	calls := source.CallsSnapshot()
+	for _, call := range calls {
+		if call.Method == "preview" {
+			t.Fatalf("domain read-state probe previewed a non-search-approved UID: calls=%+v", calls)
+		}
+		if call.Method == "seen" && call.Payload != "uid=10" {
+			t.Fatalf("domain read-state probe inspected non-search-approved seen state %q: calls=%+v", call.Payload, calls)
+		}
+	}
+}
+
 func TestRunnerRunIMAPReportsStructuredFolderStateFacts(t *testing.T) {
 	source := probeAdapter(map[string][]mailfake.Message{
 		"INBOX": {{UID: 10, VisibleByPolicy: true, Body: "fixture body"}, {UID: 20, VisibleByPolicy: true}},
