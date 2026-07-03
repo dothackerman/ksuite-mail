@@ -145,9 +145,10 @@ func (Runner) RunIMAP(ctx context.Context, src mail.Source, acct config.Account)
 			uidBehaviorCheck = probeUIDBehavior(ctx, src, acct, folder)
 			checks = append(checks, uidBehaviorCheck)
 			checks = append(checks, checkRefreshStrategy(caps, folderState, uidBehaviorCheck))
-			domainHeaderResult := probeDomainHeaders(ctx, src, acct, folder)
+			sentFolder := sentProbeFolderForListing(acct, folders)
+			domainHeaderResult := probeDomainHeaders(ctx, src, acct, folder, sentFolder.folder)
 			checks = append(checks, domainHeaderResult.check)
-			checks = append(checks, probeSentBccAvailability(ctx, src, acct, folders))
+			checks = append(checks, probeSentBccAvailability(ctx, src, acct, sentFolder))
 			if readStatePrerequisitesMet(acct, domainHeaderResult) {
 				checks = append(checks, probeReadState(ctx, src, acct, folder, state, domainHeaderResult.evidence))
 			} else {
@@ -269,14 +270,13 @@ type domainHeaderEvidence struct {
 	uids   []mail.UID
 }
 
-func probeDomainHeaders(ctx context.Context, src mail.Source, acct config.Account, folder string) domainHeaderProbeResult {
+func probeDomainHeaders(ctx context.Context, src mail.Source, acct config.Account, folder string, sentFolder string) domainHeaderProbeResult {
 	if acct.Policy == config.PolicyFull {
 		return domainHeaderProbeResult{check: probeCheck(checkDomainHeader, api.ProbeStatusNotApplicable, "full_policy", "full-policy accounts do not depend on domain-header filtering")}
 	}
 	if len(acct.Domains) == 0 {
 		return domainHeaderProbeResult{check: probeCheck(checkDomainHeader, api.ProbeStatusInconclusive, "no_domain", "domain-policy account has no configured domain")}
 	}
-	sentFolder := sentProbeFolder(acct)
 	headers := []string{"From", "To", "Cc", "Bcc"}
 	facts := &api.ProbeFacts{DomainHeaderSearch: make([]api.DomainHeaderSearch, 0, len(headers)*len(acct.Domains))}
 	counts := make([]string, 0, len(headers)*len(acct.Domains))
@@ -347,7 +347,7 @@ func probeDomainHeaders(ctx context.Context, src mail.Source, acct config.Accoun
 	return domainHeaderProbeResult{check: probeCheckFacts(checkDomainHeader, api.ProbeStatusPassed, "header_search_ok", strings.Join(counts, " "), facts), evidence: evidence}
 }
 
-func probeSentBccAvailability(ctx context.Context, src mail.Source, acct config.Account, folders []string) api.ProbeCheck {
+func probeSentBccAvailability(ctx context.Context, src mail.Source, acct config.Account, sentFolder sentProbeFolder) api.ProbeCheck {
 	if acct.Policy == config.PolicyFull {
 		return probeCheck(checkSentBcc, api.ProbeStatusNotApplicable, "full_policy", "full-policy accounts do not depend on sent Bcc filtering")
 	}
@@ -355,23 +355,22 @@ func probeSentBccAvailability(ctx context.Context, src mail.Source, acct config.
 	if len(domains) == 0 {
 		return probeCheck(checkSentBcc, api.ProbeStatusInconclusive, "no_domain", "domain-policy account has no configured domain")
 	}
-	sentFolder, source := sentProbeFolderForListing(acct, folders)
 	facts := &api.ProbeFacts{SentBccAvailability: &api.SentBccAvailability{
-		SentFolder:       sentFolder,
-		SentFolderSource: source,
+		SentFolder:       sentFolder.folder,
+		SentFolderSource: sentFolder.source,
 	}}
-	if sentFolder == "" {
+	if sentFolder.folder == "" {
 		return probeCheckFacts(checkSentBcc, api.ProbeStatusInconclusive, "sent_folder_required", "sent folder fixture is required", facts)
 	}
 
 	missingFixture := false
 	var matchedUIDCount int
 	for _, domain := range domains {
-		uids, err := src.SearchAllowed(ctx, acct, sentFolder, "Bcc", domain, mail.UIDRange{})
+		uids, err := src.SearchAllowed(ctx, acct, sentFolder.folder, "Bcc", domain, mail.UIDRange{})
 		if err != nil {
 			return probeFailure(checkSentBcc, err)
 		}
-		negativeUIDs, err := src.SearchAllowed(ctx, acct, sentFolder, "Bcc", probeNegativeValue, mail.UIDRange{})
+		negativeUIDs, err := src.SearchAllowed(ctx, acct, sentFolder.folder, "Bcc", probeNegativeValue, mail.UIDRange{})
 		if err != nil {
 			return probeFailure(checkSentBcc, err)
 		}
@@ -507,18 +506,19 @@ func firstProbeFolder(acct config.Account) string {
 	return ""
 }
 
-func sentProbeFolder(acct config.Account) string {
-	return sentProbeFolderFromList(acct.Folders)
+type sentProbeFolder struct {
+	folder string
+	source string
 }
 
-func sentProbeFolderForListing(acct config.Account, folders []string) (string, string) {
+func sentProbeFolderForListing(acct config.Account, folders []string) sentProbeFolder {
 	if folder := sentProbeFolderFromList(acct.Folders); folder != "" {
-		return folder, "configured_folder"
+		return sentProbeFolder{folder: folder, source: "configured_folder"}
 	}
 	if folder := sentProbeFolderFromProviderList(folders); folder != "" {
-		return folder, "folder_listing"
+		return sentProbeFolder{folder: folder, source: "folder_listing"}
 	}
-	return "", ""
+	return sentProbeFolder{}
 }
 
 func sentProbeFolderFromList(folders []string) string {
@@ -527,7 +527,7 @@ func sentProbeFolderFromList(folders []string) string {
 		if clean == "" {
 			continue
 		}
-		if strings.Contains(strings.ToLower(clean), "sent") {
+		if isSentFolderAlias(clean) {
 			return clean
 		}
 	}

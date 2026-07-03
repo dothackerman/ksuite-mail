@@ -1072,6 +1072,10 @@ func TestRunnerRunIMAPReportsSentBccAvailabilityFacts(t *testing.T) {
 		Folders: []string{"INBOX"},
 	})
 
+	domainCheck := checkByID(t, got, "domain_header_search")
+	if domainCheck.Status != api.ProbeStatusPassed || domainCheck.Code != "header_search_ok" {
+		t.Fatalf("domain_header_search = %+v, want passed header_search_ok using provider-listed Sent folder", domainCheck)
+	}
 	check := checkByID(t, got, "sent_bcc_availability")
 	if check.Status != api.ProbeStatusPassed || check.Code != "sent_bcc_available" {
 		t.Fatalf("sent_bcc_availability = %+v, want passed sent_bcc_available", check)
@@ -1114,9 +1118,13 @@ func TestRunnerRunIMAPSentBccAvailabilityIgnoresNonSentSubstringFolders(t *testi
 		ID:      "rs_info",
 		Policy:  config.PolicyDomain,
 		Domains: []string{"regenerativ.ch"},
-		Folders: []string{"INBOX"},
+		Folders: []string{"INBOX", "Presentations"},
 	})
 
+	domainCheck := checkByID(t, got, "domain_header_search")
+	if domainCheck.Status != api.ProbeStatusPassed || domainCheck.Code != "header_search_ok" {
+		t.Fatalf("domain_header_search = %+v, want passed header_search_ok using real Sent folder", domainCheck)
+	}
 	check := checkByID(t, got, "sent_bcc_availability")
 	if check.Status != api.ProbeStatusPassed || check.Code != "sent_bcc_available" {
 		t.Fatalf("sent_bcc_availability = %+v, want passed sent_bcc_available", check)
@@ -1127,7 +1135,7 @@ func TestRunnerRunIMAPSentBccAvailabilityIgnoresNonSentSubstringFolders(t *testi
 	}
 	for _, call := range source.CallsSnapshot() {
 		if call.Method == "search" && call.Target == "rs_info@Presentations" && call.Payload == "bcc:regenerativ.ch" {
-			t.Fatalf("sent bcc availability searched non-sent substring folder: calls=%+v", source.CallsSnapshot())
+			t.Fatalf("probe searched non-sent substring folder for Bcc: calls=%+v", source.CallsSnapshot())
 		}
 	}
 }
