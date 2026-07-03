@@ -251,6 +251,7 @@ type ProbeFacts struct {
 	UIDNEXT                *uint64              `json:"uidnext,omitempty"`
 	HighestModSeq          *int64               `json:"highestmodseq,omitempty"`
 	DomainHeaderSearch     []DomainHeaderSearch `json:"domain_header_search,omitempty"`
+	SentBccAvailability    *SentBccAvailability `json:"sent_bcc_availability,omitempty"`
 }
 
 // DomainHeaderSearch represents a fixture-safe outcome for one domain-header
@@ -260,6 +261,15 @@ type DomainHeaderSearch struct {
 	Header             string `json:"header"`
 	MatchedUIDCount    int    `json:"matched_uid_count"`
 	NonmatchingVisible bool   `json:"nonmatching_visible"`
+}
+
+// SentBccAvailability represents fixture-safe Sent folder and Bcc probe facts.
+type SentBccAvailability struct {
+	SentFolder         string `json:"sent_folder,omitempty"`
+	SentFolderSource   string `json:"sent_folder_source,omitempty"`
+	BccAvailable       *bool  `json:"bcc_available,omitempty"`
+	MatchedUIDCount    int    `json:"matched_uid_count,omitempty"`
+	NonmatchingVisible bool   `json:"nonmatching_visible,omitempty"`
 }
 
 // ReadStatus determines which top-level status applies to read responses.
