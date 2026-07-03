@@ -137,12 +137,24 @@ func (Runner) RunIMAP(ctx context.Context, src mail.Source, acct config.Account)
 			uidBehaviorCheck = probeUIDBehavior(ctx, src, acct, folder)
 			checks = append(checks, uidBehaviorCheck)
 			checks = append(checks, checkRefreshStrategy(caps, folderState, uidBehaviorCheck))
-			checks = append(checks, probeDomainHeaders(ctx, src, acct, folder))
-			checks = append(checks, probeReadState(ctx, src, acct, folder, state))
+			domainHeaderCheck := probeDomainHeaders(ctx, src, acct, folder)
+			checks = append(checks, domainHeaderCheck)
+			if readStatePrerequisitesMet(acct, domainHeaderCheck) {
+				checks = append(checks, probeReadState(ctx, src, acct, folder, state))
+			} else {
+				checks = append(checks, probeCheck(checkReadState, api.ProbeStatusInconclusive, "prerequisite_failed", "read-state probe requires validated domain-header search"))
+			}
 		}
 	}
 
 	return response(acct, checks)
+}
+
+func readStatePrerequisitesMet(acct config.Account, domainHeaderCheck api.ProbeCheck) bool {
+	if acct.Policy != config.PolicyDomain {
+		return true
+	}
+	return domainHeaderCheck.Status == api.ProbeStatusPassed
 }
 
 func response(acct config.Account, checks []api.ProbeCheck) api.ProbeIMAPResponse {
@@ -357,7 +369,7 @@ func readStateFixtureUIDs(ctx context.Context, src mail.Source, acct config.Acco
 		if domain == "" {
 			continue
 		}
-		for _, header := range []string{"From", "To", "Cc", "Bcc"} {
+		for _, header := range readStateCandidateHeaders(acct, folder) {
 			uids, err := src.SearchAllowed(ctx, acct, folder, header, domain, scope)
 			if err != nil {
 				return nil, err
@@ -374,6 +386,14 @@ func readStateFixtureUIDs(ctx context.Context, src mail.Source, acct config.Acco
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
 	return out, nil
+}
+
+func readStateCandidateHeaders(acct config.Account, folder string) []string {
+	headers := []string{"From", "To", "Cc"}
+	if strings.TrimSpace(folder) == sentProbeFolder(acct) {
+		headers = append(headers, "Bcc")
+	}
+	return headers
 }
 
 func readStateFixtureScope(state mail.RemoteFolderState) mail.UIDRange {

@@ -409,20 +409,62 @@ func TestRunnerRunIMAPBoundsReadStateFixtureScan(t *testing.T) {
 	}
 }
 
-func TestRunnerRunIMAPDomainReadStateUsesOnlySearchApprovedUIDs(t *testing.T) {
+func TestRunnerRunIMAPSkipsReadStateWhenDomainHeaderSearchFails(t *testing.T) {
+	source := probeAdapter(map[string][]mailfake.Message{
+		"INBOX": {
+			{UID: 20, VisibleByPolicy: false, Body: "private unread fixture"},
+		},
+	})
+	source.SetSearchResult("rs_info", "INBOX", "From", "regenerativ.ch", []mail.UID{20})
+	source.SetSearchResult("rs_info", "INBOX", "From", "ksuite-mail-probe.invalid", []mail.UID{20})
+
+	got := providerprobe.Runner{}.RunIMAP(context.Background(), source, domainAccount("INBOX", "regenerativ.ch"))
+
+	domainCheck := checkByID(t, got, "domain_header_search")
+	if domainCheck.Status != api.ProbeStatusFailed || domainCheck.Code != "header_search_overbroad" {
+		t.Fatalf("domain_header_search = %+v, want failed header_search_overbroad", domainCheck)
+	}
+	readState := checkByID(t, got, "read_state")
+	if readState.Status != api.ProbeStatusInconclusive || readState.Code != "prerequisite_failed" {
+		t.Fatalf("read_state = %+v, want inconclusive prerequisite_failed", readState)
+	}
+	calls := source.CallsSnapshot()
+	for _, call := range calls {
+		if call.Method == "seen" || call.Method == "preview" {
+			t.Fatalf("domain read-state probe ran after unsafe header search: calls=%+v", calls)
+		}
+	}
+}
+
+func TestRunnerRunIMAPDomainReadStateUsesOnlySameFolderValidatedHeaders(t *testing.T) {
 	source := probeAdapter(map[string][]mailfake.Message{
 		"INBOX": {
 			{UID: 10, VisibleByPolicy: true, Body: "allowed fixture", Seen: true},
 			{UID: 20, VisibleByPolicy: false, Body: "private unread fixture"},
+		},
+		"Sent": {
+			{UID: 30, VisibleByPolicy: true, Body: "sent bcc fixture"},
 		},
 	})
 	for _, header := range []string{"From", "To", "Cc"} {
 		source.SetSearchResult("rs_info", "INBOX", header, "regenerativ.ch", []mail.UID{10})
 		source.SetSearchResult("rs_info", "INBOX", header, "ksuite-mail-probe.invalid", nil)
 	}
+	source.SetSearchResult("rs_info", "INBOX", "Bcc", "regenerativ.ch", []mail.UID{20})
+	source.SetSearchResult("rs_info", "Sent", "Bcc", "regenerativ.ch", []mail.UID{30})
+	source.SetSearchResult("rs_info", "Sent", "Bcc", "ksuite-mail-probe.invalid", nil)
 
-	got := providerprobe.Runner{}.RunIMAP(context.Background(), source, domainAccount("INBOX", "regenerativ.ch"))
+	got := providerprobe.Runner{}.RunIMAP(context.Background(), source, config.Account{
+		ID:      "rs_info",
+		Policy:  config.PolicyDomain,
+		Domains: []string{"regenerativ.ch"},
+		Folders: []string{"INBOX", "Sent"},
+	})
 
+	domainCheck := checkByID(t, got, "domain_header_search")
+	if domainCheck.Status != api.ProbeStatusPassed || domainCheck.Code != "header_search_ok" {
+		t.Fatalf("domain_header_search = %+v, want passed header_search_ok", domainCheck)
+	}
 	check := checkByID(t, got, "read_state")
 	if check.Status != api.ProbeStatusInconclusive || check.Code != "fixture_required" {
 		t.Fatalf("read_state = %+v, want inconclusive fixture_required", check)
