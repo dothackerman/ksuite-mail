@@ -268,8 +268,8 @@ func TestRunnerRunIMAPChecklistMatrix(t *testing.T) {
 			account: fullAccount("INBOX"),
 			source: probeAdapter(map[string][]mailfake.Message{
 				"INBOX": {
-					{UID: 10, VisibleByPolicy: true, Body: "fixture body", MarksSeenOnPreview: true},
-					{UID: 20, VisibleByPolicy: true, Body: "fixture body"},
+					{UID: 10, VisibleByPolicy: true, Body: "fixture body"},
+					{UID: 20, VisibleByPolicy: true, Body: "fixture body", MarksSeenOnPreview: true},
 				},
 			}),
 			wantStatus: api.ProbeStatusFailed,
@@ -285,6 +285,7 @@ func TestRunnerRunIMAPChecklistMatrix(t *testing.T) {
 			source: probeAdapter(map[string][]mailfake.Message{
 				"INBOX": {
 					{UID: 10, VisibleByPolicy: true, Body: "fixture body", Seen: true},
+					{UID: 19, VisibleByPolicy: true, Body: "fixture body", Seen: true},
 					{UID: 20, VisibleByPolicy: true, Body: "fixture body"},
 				},
 			}),
@@ -301,6 +302,7 @@ func TestRunnerRunIMAPChecklistMatrix(t *testing.T) {
 			source: probeAdapter(map[string][]mailfake.Message{
 				"INBOX": {
 					{UID: 10, VisibleByPolicy: true, Body: "fixture body", Seen: true},
+					{UID: 19, VisibleByPolicy: true, Body: "fixture body", Seen: true},
 					{UID: 20, VisibleByPolicy: true, Body: "fixture body", Seen: true},
 				},
 			}),
@@ -367,6 +369,43 @@ func TestRunnerRunIMAPChecklistMatrix(t *testing.T) {
 			}
 			assertNoRawProviderLeak(t, got)
 		})
+	}
+}
+
+func TestRunnerRunIMAPBoundsReadStateFixtureScan(t *testing.T) {
+	var messages []mailfake.Message
+	for uid := mail.UID(1); uid <= 25; uid++ {
+		messages = append(messages, mailfake.Message{
+			UID:             uid,
+			VisibleByPolicy: true,
+			Body:            "fixture body",
+			Seen:            true,
+		})
+	}
+	source := probeAdapter(map[string][]mailfake.Message{"INBOX": messages})
+
+	got := providerprobe.Runner{}.RunIMAP(context.Background(), source, fullAccount("INBOX"))
+
+	check := checkByID(t, got, "read_state")
+	if check.Status != api.ProbeStatusInconclusive || check.Code != "fixture_required" {
+		t.Fatalf("read_state = %+v, want inconclusive fixture_required", check)
+	}
+	calls := source.CallsSnapshot()
+	var seenCalls int
+	var readStateListPayload string
+	for _, call := range calls {
+		if call.Method == "seen" {
+			seenCalls++
+		}
+		if call.Method == "list" {
+			readStateListPayload = call.Payload
+		}
+	}
+	if seenCalls != 10 {
+		t.Fatalf("seen calls = %d, want bounded scan of 10; calls=%+v", seenCalls, calls)
+	}
+	if readStateListPayload != "16:25" {
+		t.Fatalf("read-state list range = %q, want 16:25; calls=%+v", readStateListPayload, calls)
 	}
 }
 

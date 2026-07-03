@@ -15,6 +15,7 @@ import (
 )
 
 const probeNegativeValue = "ksuite-mail-probe.invalid"
+const readStateFixtureScanLimit = 10
 
 type checkID string
 
@@ -136,7 +137,7 @@ func (Runner) RunIMAP(ctx context.Context, src mail.Source, acct config.Account)
 			checks = append(checks, uidBehaviorCheck)
 			checks = append(checks, checkRefreshStrategy(caps, folderState, uidBehaviorCheck))
 			checks = append(checks, probeDomainHeaders(ctx, src, acct, folder))
-			checks = append(checks, probeReadState(ctx, src, acct, folder))
+			checks = append(checks, probeReadState(ctx, src, acct, folder, state))
 		}
 	}
 
@@ -300,10 +301,13 @@ func probeDomainHeaders(ctx context.Context, src mail.Source, acct config.Accoun
 	return probeCheckFacts(checkDomainHeader, api.ProbeStatusPassed, "header_search_ok", strings.Join(counts, " "), facts)
 }
 
-func probeReadState(ctx context.Context, src mail.Source, acct config.Account, folder string) api.ProbeCheck {
-	uids, err := src.ListUIDs(ctx, acct, folder, mail.UIDRange{})
+func probeReadState(ctx context.Context, src mail.Source, acct config.Account, folder string, state mail.RemoteFolderState) api.ProbeCheck {
+	uids, err := src.ListUIDs(ctx, acct, folder, readStateFixtureScope(state))
 	if err != nil {
 		return probeFailure(checkReadState, err)
+	}
+	if len(uids) > readStateFixtureScanLimit {
+		uids = uids[len(uids)-readStateFixtureScanLimit:]
 	}
 	if len(uids) == 0 {
 		return probeCheck(checkReadState, api.ProbeStatusInconclusive, "fixture_required", "BODY.PEEK read-state fixture is required")
@@ -338,6 +342,18 @@ func probeReadState(ctx context.Context, src mail.Source, acct config.Account, f
 		return probeCheckFacts(checkReadState, api.ProbeStatusFailed, "body_marked_seen", "seen_state_changed=true", facts)
 	}
 	return probeCheckFacts(checkReadState, api.ProbeStatusPassed, "body_peek_ok", "body_peek_exercised=true", facts)
+}
+
+func readStateFixtureScope(state mail.RemoteFolderState) mail.UIDRange {
+	if state.UIDNEXT == 0 {
+		return mail.UIDRange{}
+	}
+	max := state.UIDNEXT - 1
+	min := uint64(1)
+	if max >= readStateFixtureScanLimit {
+		min = max - readStateFixtureScanLimit + 1
+	}
+	return mail.UIDRange{Min: min, Max: max}
 }
 
 func domainProbeNotRun(acct config.Account) api.ProbeCheck {
