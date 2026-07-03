@@ -29,6 +29,7 @@ const (
 	checkUIDBehavior       checkID = "uid_behavior"
 	checkRefreshStrategyID checkID = "refresh_strategy"
 	checkDomainHeader      checkID = "domain_header_search"
+	checkSentBcc           checkID = "sent_bcc_availability"
 	checkReadState         checkID = "read_state"
 )
 
@@ -52,6 +53,7 @@ func (Runner) RunIMAP(ctx context.Context, src mail.Source, acct config.Account)
 			probeCheck(checkUIDBehavior, api.ProbeStatusFailed, "source_unavailable", "mail source is unavailable"),
 			inconclusiveRefreshStrategy(nil, "prerequisite_failed", "refresh strategy requires a live source"),
 			domainProbeNotRun(acct),
+			sentBccProbeNotRun(acct),
 			probeCheck(checkReadState, api.ProbeStatusInconclusive, "fixture_required", "BODY.PEEK read-state fixture is required"),
 		)
 		return response(acct, checks)
@@ -66,6 +68,7 @@ func (Runner) RunIMAP(ctx context.Context, src mail.Source, acct config.Account)
 			probeNotRun(checkUIDBehavior),
 			inconclusiveRefreshStrategy(nil, "prerequisite_failed", "refresh strategy requires prerequisite checks"),
 			domainProbeNotRun(acct),
+			sentBccProbeNotRun(acct),
 			probeNotRun(checkReadState),
 		)
 		return response(acct, checks)
@@ -80,6 +83,7 @@ func (Runner) RunIMAP(ctx context.Context, src mail.Source, acct config.Account)
 			probeNotRun(checkUIDBehavior),
 			inconclusiveRefreshStrategy(caps, "prerequisite_failed", "refresh strategy requires prerequisite checks"),
 			domainProbeNotRun(acct),
+			sentBccProbeNotRun(acct),
 			probeNotRun(checkReadState),
 		)
 		return response(acct, checks)
@@ -91,6 +95,7 @@ func (Runner) RunIMAP(ctx context.Context, src mail.Source, acct config.Account)
 			probeNotRun(checkUIDBehavior),
 			inconclusiveRefreshStrategy(caps, "prerequisite_failed", "refresh strategy requires prerequisite checks"),
 			domainProbeNotRun(acct),
+			sentBccProbeNotRun(acct),
 			probeNotRun(checkReadState),
 		)
 		return response(acct, checks)
@@ -107,6 +112,7 @@ func (Runner) RunIMAP(ctx context.Context, src mail.Source, acct config.Account)
 			probeCheck(checkUIDBehavior, api.ProbeStatusInconclusive, "no_configured_folder", "selected account has no configured folders"),
 			inconclusiveRefreshStrategy(caps, "no_configured_folder", "refresh strategy requires a configured folder"),
 			domainProbeNotRun(acct),
+			sentBccProbeNotRun(acct),
 			probeCheck(checkReadState, api.ProbeStatusInconclusive, "no_configured_folder", "selected account has no configured folders"),
 		)
 	} else {
@@ -117,6 +123,7 @@ func (Runner) RunIMAP(ctx context.Context, src mail.Source, acct config.Account)
 				probeNotRun(checkUIDBehavior),
 				inconclusiveRefreshStrategy(caps, "prerequisite_failed", "refresh strategy requires folder selection"),
 				domainProbeNotRun(acct),
+				sentBccProbeNotRun(acct),
 				probeNotRun(checkReadState),
 			)
 		} else if state.UIDVALIDITY == 0 || state.UIDNEXT == 0 {
@@ -128,6 +135,7 @@ func (Runner) RunIMAP(ctx context.Context, src mail.Source, acct config.Account)
 				uidBehaviorCheck,
 				checkRefreshStrategy(caps, folderState, uidBehaviorCheck),
 				domainProbeNotRun(acct),
+				sentBccProbeNotRun(acct),
 				probeNotRun(checkReadState),
 			)
 		} else {
@@ -139,6 +147,7 @@ func (Runner) RunIMAP(ctx context.Context, src mail.Source, acct config.Account)
 			checks = append(checks, checkRefreshStrategy(caps, folderState, uidBehaviorCheck))
 			domainHeaderResult := probeDomainHeaders(ctx, src, acct, folder)
 			checks = append(checks, domainHeaderResult.check)
+			checks = append(checks, probeSentBccAvailability(ctx, src, acct, folders))
 			if readStatePrerequisitesMet(acct, domainHeaderResult) {
 				checks = append(checks, probeReadState(ctx, src, acct, folder, state, domainHeaderResult.evidence))
 			} else {
@@ -338,6 +347,55 @@ func probeDomainHeaders(ctx context.Context, src mail.Source, acct config.Accoun
 	return domainHeaderProbeResult{check: probeCheckFacts(checkDomainHeader, api.ProbeStatusPassed, "header_search_ok", strings.Join(counts, " "), facts), evidence: evidence}
 }
 
+func probeSentBccAvailability(ctx context.Context, src mail.Source, acct config.Account, folders []string) api.ProbeCheck {
+	if acct.Policy == config.PolicyFull {
+		return probeCheck(checkSentBcc, api.ProbeStatusNotApplicable, "full_policy", "full-policy accounts do not depend on sent Bcc filtering")
+	}
+	domains := probeDomains(acct)
+	if len(domains) == 0 {
+		return probeCheck(checkSentBcc, api.ProbeStatusInconclusive, "no_domain", "domain-policy account has no configured domain")
+	}
+	sentFolder, source := sentProbeFolderForListing(acct, folders)
+	facts := &api.ProbeFacts{SentBccAvailability: &api.SentBccAvailability{
+		SentFolder:       sentFolder,
+		SentFolderSource: source,
+	}}
+	if sentFolder == "" {
+		return probeCheckFacts(checkSentBcc, api.ProbeStatusInconclusive, "sent_folder_required", "sent folder fixture is required", facts)
+	}
+
+	missingFixture := false
+	var matchedUIDCount int
+	for _, domain := range domains {
+		uids, err := src.SearchAllowed(ctx, acct, sentFolder, "Bcc", domain, mail.UIDRange{})
+		if err != nil {
+			return probeFailure(checkSentBcc, err)
+		}
+		negativeUIDs, err := src.SearchAllowed(ctx, acct, sentFolder, "Bcc", probeNegativeValue, mail.UIDRange{})
+		if err != nil {
+			return probeFailure(checkSentBcc, err)
+		}
+		if len(uids) == 0 {
+			missingFixture = true
+		}
+		matchedUIDCount += len(uids)
+		if len(negativeUIDs) > 0 {
+			facts.SentBccAvailability.BccAvailable = boolPtr(matchedUIDCount > 0)
+			facts.SentBccAvailability.MatchedUIDCount = matchedUIDCount
+			facts.SentBccAvailability.NonmatchingVisible = true
+			return probeCheckFacts(checkSentBcc, api.ProbeStatusFailed, "sent_bcc_search_overbroad", "sent_bcc_nonmatching_visible=true", facts)
+		}
+	}
+
+	available := matchedUIDCount > 0
+	facts.SentBccAvailability.BccAvailable = boolPtr(available)
+	facts.SentBccAvailability.MatchedUIDCount = matchedUIDCount
+	if missingFixture {
+		return probeCheckFacts(checkSentBcc, api.ProbeStatusInconclusive, "bcc_fixture_required", "sent_bcc_count="+strconv.Itoa(matchedUIDCount), facts)
+	}
+	return probeCheckFacts(checkSentBcc, api.ProbeStatusPassed, "sent_bcc_available", "sent_bcc_count="+strconv.Itoa(matchedUIDCount), facts)
+}
+
 func probeReadState(ctx context.Context, src mail.Source, acct config.Account, folder string, state mail.RemoteFolderState, evidence []domainHeaderEvidence) api.ProbeCheck {
 	uids, err := readStateFixtureUIDs(ctx, src, acct, folder, state, evidence)
 	if err != nil {
@@ -451,7 +509,21 @@ func firstProbeFolder(acct config.Account) string {
 }
 
 func sentProbeFolder(acct config.Account) string {
-	for _, folder := range acct.Folders {
+	return sentProbeFolderFromList(acct.Folders)
+}
+
+func sentProbeFolderForListing(acct config.Account, folders []string) (string, string) {
+	if folder := sentProbeFolderFromList(acct.Folders); folder != "" {
+		return folder, "configured_folder"
+	}
+	if folder := sentProbeFolderFromList(folders); folder != "" {
+		return folder, "folder_listing"
+	}
+	return "", ""
+}
+
+func sentProbeFolderFromList(folders []string) string {
+	for _, folder := range folders {
 		clean := strings.TrimSpace(folder)
 		if clean == "" {
 			continue
@@ -461,6 +533,24 @@ func sentProbeFolder(acct config.Account) string {
 		}
 	}
 	return ""
+}
+
+func probeDomains(acct config.Account) []string {
+	out := make([]string, 0, len(acct.Domains))
+	for _, domain := range acct.Domains {
+		clean := strings.TrimSpace(domain)
+		if clean != "" {
+			out = append(out, clean)
+		}
+	}
+	return out
+}
+
+func sentBccProbeNotRun(acct config.Account) api.ProbeCheck {
+	if acct.Policy == config.PolicyFull {
+		return probeCheck(checkSentBcc, api.ProbeStatusNotApplicable, "full_policy", "full-policy accounts do not depend on sent Bcc filtering")
+	}
+	return probeNotRun(checkSentBcc)
 }
 
 func probeFailure(id checkID, err error) api.ProbeCheck {

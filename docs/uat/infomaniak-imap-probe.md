@@ -143,8 +143,10 @@ Outcome:
 
 Expected behavior:
 
-- The probe identifies the correct Sent folder behavior for configured accounts.
-- The probe confirms or marks inconclusive whether `Bcc` is available in sent mail.
+- The probe reports sanitized Sent folder diagnostics for the selected account.
+- Sent folder discovery may use the provider folder listing, but message-level checks remain bounded to the daemon-selected Sent diagnostic target.
+- The probe confirms `Bcc` availability only when a controlled sent fixture produces positive `UID SEARCH HEADER Bcc <domain>` evidence.
+- Missing Sent folder evidence or missing sent-message `Bcc` fixture evidence returns `inconclusive`, not unsupported.
 - No sent message content is returned.
 
 Outcome:
